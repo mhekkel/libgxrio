@@ -10,7 +10,10 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <istream>
 #include <memory>
+#include <ostream>
+#include <streambuf>
 #include <utility>
 
 #include <zlib.h>
@@ -36,8 +39,11 @@
 namespace gxrio
 {
 
-constexpr size_t kDefaultBufferSize = 256;
+constexpr size_t kDefaultBufferSize = 8192;
 constexpr int kDefaultCompressionLevel = 9;
+
+/// \brief The longest signature of the supported compression formats (the xz magic)
+constexpr std::streamsize kMaxSignatureLength = 6;
 
 // --------------------------------------------------------------------
 
@@ -386,9 +392,15 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 	}
 
 	/// \brief Set the compression level, 0 (no compression) to 9 (maximum compression)
+	///
+	/// When the stream is already initialized the new level is applied
+	/// immediately using deflateParams().
 	void set_compression_level(int level) noexcept override
 	{
 		m_compression_level = level;
+
+		if (m_zstream)
+			::deflateParams(m_zstream.get(), level, Z_DEFAULT_STRATEGY);
 	}
 
 	/// \brief Initialize the internal zlib structures
@@ -873,6 +885,8 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 	std::array<char_type, BufferSize> m_in_buffer;
 };
 
+#endif
+
 // --------------------------------------------------------------------
 
 /// \brief A streambuf that replays a number of bytes before delegating to another streambuf
@@ -926,13 +940,11 @@ class basic_prefix_streambuf : public std::basic_streambuf<CharT, Traits>
 	streambuf_type *m_upstream;
 
 	/// \brief The signature bytes that were already consumed from the upstream
-	std::array<char_type, kDefaultBufferSize> m_prefix;
+	std::array<char_type, kMaxSignatureLength> m_prefix;
 
 	/// \brief A buffer to read the remaining data into
 	std::array<char_type, kDefaultBufferSize> m_buffer;
 };
-
-#endif
 
 // --------------------------------------------------------------------
 
@@ -961,8 +973,8 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 	using gzip_streambuf_type = basic_igzip_streambuf<char_type, traits_type>;
 #if HAVE_LibLZMA
 	using xz_streambuf_type = basic_ixz_streambuf<char_type, traits_type>;
-	using prefix_streambuf_type = basic_prefix_streambuf<char_type, traits_type>;
 #endif
+	using prefix_streambuf_type = basic_prefix_streambuf<char_type, traits_type>;
 
 	/// \brief Regular move constructor
 	basic_istream(basic_istream &&rhs) noexcept
@@ -1027,8 +1039,6 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 		m_upstream_buf.reset(nullptr);
 		m_upstream = nullptr;
 
-		const std::streamsize kMaxSignatureLength = 6; // the xz magic is the longest one
-
 		char_type signature[kMaxSignatureLength];
 		std::streamsize signature_length = 0;
 
@@ -1039,11 +1049,18 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 			sb->sbumpc();
 			ch = sb->sgetc();
 
-			if (ch == 0x8b) // Read gzip header
+			if (ch == 0x8b) // gzip magic
 			{
 				signature[signature_length++] = traits_type::to_char_type(ch);
 				sb->sbumpc();
-				m_gxriobuf.reset(new gzip_streambuf_type);
+				ch = sb->sgetc();
+
+				if (ch == 0x08) // compression method must be deflate
+				{
+					signature[signature_length++] = traits_type::to_char_type(ch);
+					sb->sbumpc();
+					m_gxriobuf.reset(new gzip_streambuf_type);
+				}
 			}
 		}
 #if HAVE_LibLZMA
@@ -1134,7 +1151,8 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 
 	~basic_ifstream()
 	{
-		close();
+		if (is_open())
+			close();
 	}
 
 	/// \brief Construct an ifstream
@@ -1212,11 +1230,11 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 #if HAVE_LibLZMA
 			else if (filename.extension() == ".xz")
 				this->m_gxriobuf.reset(new xz_streambuf_type);
+#endif
 			else
 				this->m_gxriobuf.reset(nullptr);
 
 			this->m_upstream = &m_filebuf;
-#endif
 
 			if (not this->m_gxriobuf)
 			{
@@ -1401,7 +1419,8 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 
 	~basic_ofstream()
 	{
-		close();
+		if (is_open())
+			close();
 	}
 
 	/// \brief Construct an ofstream
@@ -1466,11 +1485,16 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	/// \brief Set the compression level to use, 0 (no compression) to 9 (maximum).
 	///
 	/// This applies to files that are opened with a .gz or .xz extension.
-	/// The default is 9.
+	/// The default is 9. When called on an already open compressed file the
+	/// level is forwarded to the active compressor; for gzip it takes effect
+	/// immediately, for xz it applies the next time a file is opened.
 
 	void set_compression_level(int level)
 	{
 		m_compression_level = level;
+
+		if (this->m_gxriobuf)
+			this->m_gxriobuf->set_compression_level(level);
 	}
 
 	/// \brief Open the file \a filename with mode \a mode

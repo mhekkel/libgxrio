@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.3.0] - 2026-11-08
+
+### Fixed
+- `basic_ifstream::open()` no longer leaves a stale decompressor behind when a
+  non-compressed file is opened in a build without LibLZMA (the `else` branch and
+  `m_upstream` assignment were inside `#if HAVE_LibLZMA`).
+- Builds without LibLZMA compile again: `basic_prefix_streambuf` (which has no lzma
+  dependency) is no longer wrapped in `#if HAVE_LibLZMA`, and the xz-specific test
+  cases are guarded accordingly.
+- The installed `gxrioConfig.cmake` only does `find_dependency(LibLZMA REQUIRED)` when
+  gxrio was actually built with LibLZMA.
+- `basic_ofstream::set_compression_level()` on an already open compressed file is no
+  longer a no-op: the level is forwarded to the active streambuf, and the gzip
+  streambuf applies it immediately via `deflateParams()`.
+- Destroying a never-opened or already-closed `ifstream`/`ofstream` no longer sets
+  failbit.
+- Gzip format sniffing now also checks the compression method byte (`0x08`, deflate),
+  reducing false positives on data that starts with `1f 8b`.
+- README typos fixed; installation instructions updated; documented the C++17/zlib/
+  liblzma requirements, `BUILD_EXAMPLE`, and `set_compression_level()`.
+- CHANGELOG: `ENABLE_EXAMPLE` corrected to `BUILD_EXAMPLE`.
+
+### Changed
+- `kDefaultBufferSize` raised from 256 to 8192.
+- `basic_prefix_streambuf` only buffers the signature bytes (6) instead of a full
+  256-byte buffer.
+- Explicit `<istream>`, `<ostream>` and `<streambuf>` includes instead of relying on
+  `<fstream>`.
+- CI no longer installs the unused `libboost-dev` package.
+
 ## [1.2.0] - 2026-08-18
 
 ### Changed
@@ -19,7 +49,7 @@
 - Regression tests for `swap()`, move construction of `istream` and the
   gzip/xz streambufs, reopening with a different extension, truncated and
   corrupt input, and compression levels.
-- `ENABLE_EXAMPLE` CMake option that builds the `my-zcat` example.
+- `BUILD_EXAMPLE` CMake option that builds the `my-zcat` example.
 - Clang support for the `-Wall -Wextra` warning flags.
 
 ### Fixed

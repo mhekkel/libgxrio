@@ -269,7 +269,11 @@ TEST_CASE("swapping ifstream objects", "[t_9]")
 {
 	// swapping ifstream objects transfers the (de)compressor with the filebuf
 	gxrio::ifstream in_1, in_2;
+#if HAVE_LibLZMA
 	in_1.open(gTestDir / "hello.txt.xz");
+#else
+	in_1.open(gTestDir / "hello.txt.gz");
+#endif
 
 	in_1.swap(in_2);
 
@@ -351,7 +355,11 @@ TEST_CASE("moving an istream wrapping an uncompressed streambuf", "[t_11]")
 TEST_CASE("truncated compressed input reaches eof", "[t_12]")
 {
 	// truncated compressed input reads what is available and hits eof without hanging
-	for (fs::path f : { gTestDir / "hello.txt.gz", gTestDir / "hello.txt.xz" })
+	for (fs::path f : {
+#if HAVE_LibLZMA
+			 gTestDir / "hello.txt.xz",
+#endif
+			 gTestDir / "hello.txt.gz" })
 	{
 		std::ifstream data(f, std::ios::binary);
 		std::vector<char> contents(
