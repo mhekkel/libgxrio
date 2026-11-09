@@ -5,17 +5,17 @@
 cmake_minimum_required(VERSION 3.16)
 
 # set the project name
-project(gxrio VERSION 1.3.0 LANGUAGES CXX)
+project(gxrio VERSION 1.3.1 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
-include(CTest)
 
 set(CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "The minimum version of C++ required for this library")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(BUILD_EXAMPLE "Build the my-zcat example application" OFF)
+option(GXRIO_BUILD_EXAMPLE "Build the my-zcat example application" OFF)
+option(GXRIO_BUILD_TESTING "Build tests" OFF)
 
 if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers")
@@ -136,8 +136,10 @@ install(
     FILES ${CMAKE_CURRENT_BINARY_DIR}/cmake/gxrioConfig.cmake "${version_config}"
     DESTINATION ${CONFIG_LOC})
 
-if(BUILD_TESTING)
-    enable_testing()
+if(GXRIO_BUILD_TESTING)
+	include(CTest)
+
+	enable_testing()
 
     find_package(Catch2 REQUIRED)
 
@@ -161,9 +163,9 @@ if(BUILD_TESTING)
         add_test(NAME ${TEST}
             COMMAND $<TARGET_FILE:${TEST}> --testdir ${PROJECT_SOURCE_DIR}/test)
     endforeach()
-endif(BUILD_TESTING)
+endif(GXRIO_BUILD_TESTING)
 
-if(BUILD_EXAMPLE)
+if(GXRIO_BUILD_EXAMPLE)
     add_executable(my-zcat example/my-zcat.cpp)
     target_link_libraries(my-zcat gxrio::gxrio)
 endif()
