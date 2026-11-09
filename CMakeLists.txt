@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 # set the project name
-project(gxrio VERSION 1.2.0 LANGUAGES CXX)
+project(gxrio VERSION 1.3.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -113,6 +113,12 @@ if(WIN32 AND NOT CYGWIN)
     set(CONFIG_LOC CMake)
 else()
     set(CONFIG_LOC "${CMAKE_INSTALL_LIBDIR}/cmake/gxrio")
+endif()
+
+if(LibLZMA_FOUND)
+    set(GXRIO_LZMA_DEPENDENCY "find_dependency(LibLZMA REQUIRED)")
+else()
+    set(GXRIO_LZMA_DEPENDENCY "")
 endif()
 
 configure_package_config_file(
