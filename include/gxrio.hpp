@@ -8,13 +8,31 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <istream>
 #include <memory>
 #include <ostream>
 #include <streambuf>
+#include <string>
+#include <type_traits>
 #include <utility>
+
+// Allow standalone use of this header: unless the build system configured
+// HAVE_LibLZMA explicitly, detect liblzma by the presence of its header.
+#if !defined(HAVE_LibLZMA)
+# if defined(__has_include)
+#  if __has_include(<lzma.h>)
+#   define HAVE_LibLZMA 1
+#  else
+#   define HAVE_LibLZMA 0
+#  endif
+# else
+#  define HAVE_LibLZMA 0
+# endif
+#endif
 
 #include <zlib.h>
 #if HAVE_LibLZMA
@@ -34,8 +52,6 @@
 /// whether to use a compressions/decompression algorithm is
 /// based on the extension of the \a filename argument.
 
-// NOLINTBEGIN(bugprone-use-after-move)
-
 namespace gxrio
 {
 
@@ -44,6 +60,20 @@ constexpr int kDefaultCompressionLevel = 9;
 
 /// \brief The longest signature of the supported compression formats (the xz magic)
 constexpr std::streamsize kMaxSignatureLength = 6;
+
+namespace detail
+{
+
+/// \brief Read from an upstream streambuf into \a buffer, clamping a negative
+/// result to zero so it can safely be used as an unsigned byte count.
+template <typename Streambuf, typename CharT, size_t N>
+std::streamsize sgetn(Streambuf *sb, std::array<CharT, N> &buffer)
+{
+	std::streamsize n = sb->sgetn(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+	return n < 0 ? 0 : n;
+}
+
+} // namespace detail
 
 // --------------------------------------------------------------------
 
@@ -73,9 +103,12 @@ class basic_streambuf : public std::basic_streambuf<CharT, Traits>
 	basic_streambuf(const basic_streambuf &) = delete;
 
 	basic_streambuf(basic_streambuf &&rhs) noexcept
-		: streambuf_type(std::move(rhs))
+		: streambuf_type(static_cast<streambuf_type &&>(rhs))
 	{
 		m_upstream = std::exchange(rhs.m_upstream, nullptr);
+		m_ios = std::exchange(rhs.m_ios, nullptr);
+		m_has_error = rhs.m_has_error;
+		rhs.m_has_error = false;
 	}
 
 	basic_streambuf &operator=(const basic_streambuf &) = delete;
@@ -83,12 +116,30 @@ class basic_streambuf : public std::basic_streambuf<CharT, Traits>
 	basic_streambuf &operator=(basic_streambuf &&rhs) noexcept
 	{
 		m_upstream = std::exchange(rhs.m_upstream, nullptr);
+		m_ios = std::exchange(rhs.m_ios, nullptr);
+		m_has_error = rhs.m_has_error;
+		rhs.m_has_error = false;
 		return *this;
 	}
 
 	void set_upstream(streambuf_type *upstream) noexcept
 	{
 		m_upstream = upstream;
+	}
+
+	/// \brief Register the stream that should be notified of (de)compression errors
+	///
+	/// The stream is expected to be the stream that owns this streambuf as its
+	/// rdbuf. It receives badbit when an error is encountered.
+	void set_ios(std::basic_ios<CharT, Traits> *ios) noexcept
+	{
+		m_ios = ios;
+	}
+
+	/// \brief Return true if a (de)compression error was encountered
+	bool error() const noexcept
+	{
+		return m_has_error;
 	}
 
 	virtual basic_streambuf *init(streambuf_type *sb) = 0;
@@ -98,8 +149,40 @@ class basic_streambuf : public std::basic_streambuf<CharT, Traits>
 	virtual void set_compression_level(int /*level*/) noexcept {}
 
   protected:
+	/// \brief Mark the streambuf as failed and set badbit on the owning stream
+	///
+	/// Error reporting is noexcept on purpose: this method is reached from
+	/// close(), which in turn is called from destructors, and from underflow()
+	/// and overflow(). Throwing here would either terminate the process or
+	/// interrupt an in-progress close(). The error remains visible through
+	/// error() and through the stream's badbit.
+	void set_error() noexcept
+	{
+		m_has_error = true;
+
+		if (m_ios != nullptr)
+		{
+			try
+			{
+				m_ios->setstate(std::ios_base::badbit);
+			}
+			catch (...)
+			{
+				// badbit has been set; swallow the notification so error
+				// reporting (and close from a destructor) cannot throw.
+				m_has_error = true;
+			}
+		}
+	}
+
 	/// \brief The upstream streambuf object, usually this is a basic_filebuf
 	streambuf_type *m_upstream = nullptr;
+
+	/// \brief The stream to notify when an error occurs, may be null
+	std::basic_ios<CharT, Traits> *m_ios = nullptr;
+
+	/// \brief Set when a (de)compression error was encountered
+	bool m_has_error = false;
 };
 
 // --------------------------------------------------------------------
@@ -113,12 +196,10 @@ class basic_streambuf : public std::basic_streambuf<CharT, Traits>
 /// This implementation of streambuf can decompress (inflate) data compressed
 /// using zlib.
 
-template <typename CharT, typename Traits, size_t BufferSize = kDefaultBufferSize>
+template <typename CharT, typename Traits, size_t BufferSize = kDefaultBufferSize, std::enable_if_t<sizeof(CharT) == 1, int> = 0>
 class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 {
   public:
-	static_assert(sizeof(CharT) == 1, "Unfortunately, support for wide characters is not implemented yet.");
-
 	using char_type = CharT;
 	using traits_type = Traits;
 
@@ -135,12 +216,15 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 
 	/// \brief Move constructor
 	basic_igzip_streambuf(basic_igzip_streambuf &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		std::swap(m_zstream, rhs.m_zstream);
 		std::swap(m_gzheader, rhs.m_gzheader);
+		m_finished = rhs.m_finished;
 
-		auto p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
+		auto p = m_out_buffer.data();
+		if (rhs.gptr() != nullptr and rhs.egptr() != nullptr)
+			p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
 		this->setg(m_out_buffer.data(), m_out_buffer.data(), p);
 
 		if (m_zstream and m_zstream->avail_in > 0)
@@ -158,12 +242,15 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief Move operator= implementation
 	basic_igzip_streambuf &operator=(basic_igzip_streambuf &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		base_type::operator=(static_cast<base_type &&>(rhs));
 
 		std::swap(m_zstream, rhs.m_zstream);
 		std::swap(m_gzheader, rhs.m_gzheader);
+		m_finished = rhs.m_finished;
 
-		auto p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
+		auto p = m_out_buffer.data();
+		if (rhs.gptr() != nullptr and rhs.egptr() != nullptr)
+			p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
 		this->setg(m_out_buffer.data(), m_out_buffer.data(), p);
 
 		if (m_zstream and m_zstream->avail_in > 0)
@@ -194,6 +281,7 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 			m_gzheader.reset(nullptr);
 		}
 
+		m_finished = false;
 		this->setg(nullptr, nullptr, nullptr);
 
 		return this;
@@ -208,9 +296,15 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// but we must maintain that structure.
 	base_type *init(streambuf_type *upstream) override
 	{
+		if (upstream == nullptr)
+			return nullptr;
+
 		this->set_upstream(upstream);
 
 		close();
+
+		m_finished = false;
+		this->m_has_error = false;
 
 		m_zstream.reset(new z_stream_s);
 		m_gzheader.reset(new gz_header_s);
@@ -224,7 +318,7 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 		if (err == Z_OK)
 		{
 			zstream.next_in = reinterpret_cast<unsigned char *>(m_in_buffer.data());
-			zstream.avail_in = static_cast<uInt>(this->m_upstream->sgetn(m_in_buffer.data(), m_in_buffer.size()));
+			zstream.avail_in = static_cast<uInt>(detail::sgetn(this->m_upstream, m_in_buffer));
 
 			err = ::inflateGetHeader(&zstream, &header);
 
@@ -242,6 +336,9 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief The actual work is done here.
 	int_type underflow() override
 	{
+		if (this->m_has_error)
+			return traits_type::eof();
+
 		if (m_zstream and this->m_upstream)
 		{
 			auto &zstream = *m_zstream.get();
@@ -255,14 +352,53 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 				if (zstream.avail_in == 0)
 				{
 					zstream.next_in = reinterpret_cast<unsigned char *>(m_in_buffer.data());
-					zstream.avail_in = static_cast<uInt>(this->m_upstream->sgetn(m_in_buffer.data(), m_in_buffer.size()));
+					zstream.avail_in = static_cast<uInt>(detail::sgetn(this->m_upstream, m_in_buffer));
 				}
 
 				if (zstream.avail_in == 0)
+				{
+					// The upstream is exhausted. If the compressed stream did not
+					// end cleanly, the input was truncated.
+					if (not m_finished)
+						this->set_error();
 					break;
+				}
 
-				int err = ::inflate(&zstream, Z_SYNC_FLUSH);
+				// A previous call saw the end of a gzip member while there was
+				// still input available, i.e. a concatenated member. Reset for it.
+				if (m_finished)
+				{
+					if (::inflateReset2(&zstream, 47) != Z_OK)
+					{
+						this->set_error();
+						break;
+					}
+					m_finished = false;
+				}
+
+				int err = ::inflate(&zstream, Z_NO_FLUSH);
 				std::streamsize n = kBufferByteSize - zstream.avail_out;
+
+				if (err == Z_STREAM_END)
+				{
+					if (zstream.avail_in > 0)
+					{
+						// Another gzip member follows in this input buffer.
+						if (::inflateReset2(&zstream, 47) != Z_OK)
+						{
+							this->set_error();
+							break;
+						}
+						err = Z_OK;
+					}
+					else
+						m_finished = true;
+				}
+				else if (err < Z_OK)
+				{
+					this->set_error();
+					break;
+				}
 
 				if (n > 0)
 				{
@@ -273,11 +409,10 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 					break;
 				}
 
-				if (err == Z_STREAM_END and zstream.avail_in > 0)
-					err = ::inflateReset2(&zstream, 47);
-
-				if (err < Z_OK)
-					break;
+				// No output was produced. If this was not a clean end of the
+				// stream, try again with more input or output space.
+				if (err == Z_STREAM_END)
+					continue;
 			}
 		}
 
@@ -292,6 +427,9 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief The zlib internal structures are maintained as pointers to avoid having
 	/// to copy their content in move constructors.
 	std::unique_ptr<gz_header> m_gzheader;
+
+	/// \brief Set when the end of a gzip member was reached
+	bool m_finished = false;
 
 	/// \brief Input buffer, this is the input for zlib
 	std::array<char_type, BufferSize> m_in_buffer;
@@ -310,12 +448,10 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 ///
 /// This implementation of streambuf can compress (deflate) data using zlib.
 
-template <typename CharT, typename Traits, size_t BufferSize = kDefaultBufferSize>
+template <typename CharT, typename Traits, size_t BufferSize = kDefaultBufferSize, std::enable_if_t<sizeof(CharT) == 1, int> = 0>
 class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 {
   public:
-	static_assert(sizeof(CharT) == 1, "Unfortunately, support for wide characters is not implemented yet.");
-
 	using char_type = CharT;
 	using traits_type = Traits;
 
@@ -332,16 +468,16 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 
 	/// \brief Move constructor
 	basic_ogzip_streambuf(basic_ogzip_streambuf &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		std::swap(m_zstream, rhs.m_zstream);
 		std::swap(m_gzheader, rhs.m_gzheader);
 
 		m_compression_level = rhs.m_compression_level;
-		m_error = rhs.m_error;
 
 		this->setp(m_in_buffer.data(), m_in_buffer.data() + m_in_buffer.size());
-		this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
+		if (rhs.pbase() != nullptr and rhs.pptr() != nullptr)
+			this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
 		rhs.setp(nullptr, nullptr);
 	}
 
@@ -350,16 +486,22 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief Move operator=
 	basic_ogzip_streambuf &operator=(basic_ogzip_streambuf &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		if (this == &rhs)
+			return *this;
+
+		// Flush the old state before the base move discards our upstream.
+		close();
+
+		base_type::operator=(static_cast<base_type &&>(rhs));
 
 		std::swap(m_zstream, rhs.m_zstream);
 		std::swap(m_gzheader, rhs.m_gzheader);
 
 		m_compression_level = rhs.m_compression_level;
-		m_error = rhs.m_error;
 
 		this->setp(m_in_buffer.data(), m_in_buffer.data() + m_in_buffer.size());
-		this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
+		if (rhs.pbase() != nullptr and rhs.pptr() != nullptr)
+			this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
 		rhs.setp(nullptr, nullptr);
 
 		return *this;
@@ -388,7 +530,7 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 
 		this->setp(nullptr, nullptr);
 
-		return m_error ? nullptr : this;
+		return this->m_has_error ? nullptr : this;
 	}
 
 	/// \brief Set the compression level, 0 (no compression) to 9 (maximum compression)
@@ -397,10 +539,10 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// immediately using deflateParams().
 	void set_compression_level(int level) noexcept override
 	{
-		m_compression_level = level;
+		m_compression_level = std::clamp(level, 0, 9);
 
 		if (m_zstream)
-			::deflateParams(m_zstream.get(), level, Z_DEFAULT_STRATEGY);
+			::deflateParams(m_zstream.get(), m_compression_level, Z_DEFAULT_STRATEGY);
 	}
 
 	/// \brief Initialize the internal zlib structures
@@ -411,11 +553,16 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// a gzip header.
 	base_type *init(streambuf_type *upstream) override
 	{
-		this->set_upstream(upstream);
+		if (upstream == nullptr)
+			return nullptr;
 
-		m_error = false;
-
+		// Finish and tear down any existing stream while the old upstream is
+		// still installed. Otherwise buffered data would be flushed to the new
+		// upstream. Only then start a clean session on the new upstream.
 		close();
+
+		this->set_upstream(upstream);
+		this->m_has_error = false;
 
 		m_zstream.reset(new z_stream_s);
 		m_gzheader.reset(new gz_header_s);
@@ -428,7 +575,7 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 		const int WINDOW_BITS = 15, GZIP_ENCODING = 16;
 
 		int err = deflateInit2(&zstream, m_compression_level, Z_DEFLATED,
-			WINDOW_BITS | GZIP_ENCODING, Z_DEFLATED, Z_DEFAULT_STRATEGY);
+			WINDOW_BITS | GZIP_ENCODING, 8 /* memLevel */, Z_DEFAULT_STRATEGY);
 
 		if (err == Z_OK)
 			err = ::deflateSetHeader(&zstream, &header);
@@ -448,7 +595,7 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 	///
 	int_type overflow(int_type ch) override
 	{
-		if (not m_zstream)
+		if (not m_zstream or this->m_has_error or this->pbase() == nullptr)
 			return traits_type::eof();
 
 		auto &zstream = *m_zstream;
@@ -457,6 +604,8 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 		zstream.avail_in = static_cast<uInt>(this->pptr() - this->pbase());
 
 		char_type buffer[BufferSize];
+
+		bool failed = false;
 
 		for (;;)
 		{
@@ -472,7 +621,7 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 
 				if (r != n)
 				{
-					m_error = true;
+					this->set_error();
 					return traits_type::eof();
 				}
 			}
@@ -486,12 +635,18 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 					continue;
 			}
 			else if (err != Z_STREAM_END)
-				m_error = true;
+			{
+				this->set_error();
+				failed = true;
+			}
 
 			break;
 		}
 
 		this->setp(this->m_in_buffer.data(), this->m_in_buffer.data() + this->m_in_buffer.size());
+
+		if (failed or this->m_has_error)
+			return traits_type::eof();
 
 		if (not traits_type::eq_int_type(ch, traits_type::eof()))
 		{
@@ -500,6 +655,63 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 		}
 
 		return ch;
+	}
+
+	/// \brief Flush the pending input through zlib and out to the upstream
+	///
+	/// Unlike close(), this does not finish the compressed stream; writing can
+	/// continue afterwards.
+	int sync() override
+	{
+		if (this->m_has_error)
+			return -1;
+
+		if (not m_zstream)
+			return 0;
+
+		if (this->pbase() == nullptr or this->pptr() == nullptr)
+			return -1;
+
+		auto &zstream = *m_zstream;
+
+		zstream.next_in = reinterpret_cast<unsigned char *>(this->pbase());
+		zstream.avail_in = static_cast<uInt>(this->pptr() - this->pbase());
+
+		char_type buffer[BufferSize];
+
+		for (;;)
+		{
+			zstream.next_out = reinterpret_cast<unsigned char *>(buffer);
+			zstream.avail_out = sizeof(buffer);
+
+			int err = ::deflate(&zstream, Z_SYNC_FLUSH);
+
+			std::streamsize n = sizeof(buffer) - zstream.avail_out;
+			if (n > 0 and this->m_upstream->sputn(reinterpret_cast<char_type *>(buffer), n) != n)
+			{
+				this->set_error();
+				return -1;
+			}
+
+			if (err != Z_OK)
+			{
+				this->set_error();
+				return -1;
+			}
+
+			if (zstream.avail_out != 0 and zstream.avail_in == 0)
+				break;
+		}
+
+		this->setp(this->m_in_buffer.data(), this->m_in_buffer.data() + this->m_in_buffer.size());
+
+		if (this->m_upstream->pubsync() != 0)
+		{
+			this->set_error();
+			return -1;
+		}
+
+		return 0;
 	}
 
   private:
@@ -514,8 +726,6 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief The compression level used, 0 (none) to 9 (maximum)
 	int m_compression_level = kDefaultCompressionLevel;
 
-	/// \brief Set when a write to the upstream failed, so close() can report the error
-	bool m_error = false;
 
 	/// \brief Input buffer, this is the input for zlib
 	std::array<char_type, BufferSize> m_in_buffer;
@@ -553,11 +763,14 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 
 	/// \brief Move constructor
 	basic_ixz_streambuf(basic_ixz_streambuf &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		std::swap(m_xzstream, rhs.m_xzstream);
+		m_finished = rhs.m_finished;
 
-		auto p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
+		auto p = m_out_buffer.data();
+		if (rhs.gptr() != nullptr and rhs.egptr() != nullptr)
+			p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
 		this->setg(m_out_buffer.data(), m_out_buffer.data(), p);
 
 		if (m_xzstream and m_xzstream->avail_in > 0)
@@ -575,10 +788,13 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief Move operator= implementation
 	basic_ixz_streambuf &operator=(basic_ixz_streambuf &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		base_type::operator=(static_cast<base_type &&>(rhs));
 		std::swap(m_xzstream, rhs.m_xzstream);
+		m_finished = rhs.m_finished;
 
-		auto p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
+		auto p = m_out_buffer.data();
+		if (rhs.gptr() != nullptr and rhs.egptr() != nullptr)
+			p = std::copy(rhs.gptr(), rhs.egptr(), m_out_buffer.data());
 		this->setg(m_out_buffer.data(), m_out_buffer.data(), p);
 
 		if (m_xzstream and m_xzstream->avail_in > 0)
@@ -608,6 +824,7 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 			m_xzstream.reset(nullptr);
 		}
 
+		m_finished = false;
 		this->setg(nullptr, nullptr, nullptr);
 
 		return this;
@@ -622,16 +839,22 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 	/// but we must maintain that structure.
 	base_type *init(streambuf_type *upstream) override
 	{
+		if (upstream == nullptr)
+			return nullptr;
+
 		this->set_upstream(upstream);
 
 		close();
+
+		m_finished = false;
+		this->m_has_error = false;
 
 		m_xzstream.reset(new lzma_stream);
 
 		auto &xzstream = *m_xzstream.get();
 		xzstream = LZMA_STREAM_INIT;
 
-		int err = lzma_stream_decoder(&xzstream, UINT64_MAX, LZMA_TELL_NO_CHECK);
+		int err = lzma_stream_decoder(&xzstream, UINT64_MAX, LZMA_TELL_NO_CHECK | LZMA_CONCATENATED);
 
 		return err == LZMA_OK ? this : nullptr;
 	}
@@ -640,12 +863,15 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief The actual work is done here.
 	int_type underflow() override
 	{
+		if (this->m_has_error)
+			return traits_type::eof();
+
 		if (m_xzstream and this->m_upstream)
 		{
 			auto &zstream = *m_xzstream.get();
 			const std::streamsize kBufferByteSize = m_out_buffer.size();
 
-			while (this->gptr() == this->egptr())
+			while (not m_finished and this->gptr() == this->egptr())
 			{
 				zstream.next_out = reinterpret_cast<unsigned char *>(m_out_buffer.data());
 				zstream.avail_out = kBufferByteSize;
@@ -654,14 +880,45 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 				if (zstream.avail_in == 0)
 				{
 					zstream.next_in = reinterpret_cast<unsigned char *>(m_in_buffer.data());
-					zstream.avail_in = this->m_upstream->sgetn(m_in_buffer.data(), m_in_buffer.size());
+					zstream.avail_in = static_cast<size_t>(detail::sgetn(this->m_upstream, m_in_buffer));
 					at_eof = zstream.avail_in == 0;
 				}
 
-				int err = ::lzma_code(&zstream, LZMA_RUN);
+				// Because LZMA_CONCATENATED is used, the decoder must be told
+				// that the input has ended. This is also how truncation is
+				// detected.
+				const lzma_action action = at_eof ? LZMA_FINISH : LZMA_RUN;
+				int err = ::lzma_code(&zstream, action);
 				std::streamsize n = kBufferByteSize - zstream.avail_out;
 
-				if (err == LZMA_STREAM_END or (err == LZMA_OK and n > 0))
+				// LZMA_NO_CHECK is an informational return code that is only
+				// produced because we enabled LZMA_TELL_NO_CHECK. It means the
+				// stream has no integrity check; decoding must simply continue.
+				if (err == LZMA_NO_CHECK)
+					err = LZMA_OK;
+
+				if (err == LZMA_STREAM_END)
+				{
+					m_finished = true;
+
+					if (n > 0)
+					{
+						this->setg(
+							m_out_buffer.data(),
+							m_out_buffer.data(),
+							m_out_buffer.data() + n);
+					}
+
+					break;
+				}
+
+				if (err != LZMA_OK)
+				{
+					this->set_error();
+					break;
+				}
+
+				if (n > 0)
 				{
 					this->setg(
 						m_out_buffer.data(),
@@ -669,9 +926,6 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 						m_out_buffer.data() + n);
 					break;
 				}
-
-				if (err != LZMA_OK or at_eof)
-					break;
 			}
 		}
 
@@ -682,6 +936,9 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief The lzma internal structures are maintained as pointers to avoid having
 	/// to copy their content in move constructors.
 	std::unique_ptr<lzma_stream> m_xzstream;
+
+	/// \brief Set when the end of the xz stream was reached
+	bool m_finished = false;
 
 	/// \brief Input buffer, this is the input for xz
 	std::array<char_type, BufferSize> m_in_buffer;
@@ -720,15 +977,15 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 
 	/// \brief Move constructor
 	basic_oxz_streambuf(basic_oxz_streambuf &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		std::swap(m_xzstream, rhs.m_xzstream);
 
 		m_compression_level = rhs.m_compression_level;
-		m_error = rhs.m_error;
 
 		this->setp(m_in_buffer.data(), m_in_buffer.data() + m_in_buffer.size());
-		this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
+		if (rhs.pbase() != nullptr and rhs.pptr() != nullptr)
+			this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
 		rhs.setp(nullptr, nullptr);
 	}
 
@@ -737,15 +994,21 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief Move operator=
 	basic_oxz_streambuf &operator=(basic_oxz_streambuf &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		if (this == &rhs)
+			return *this;
+
+		// Flush the old state before the base move discards our upstream.
+		close();
+
+		base_type::operator=(static_cast<base_type &&>(rhs));
 
 		std::swap(m_xzstream, rhs.m_xzstream);
 
 		m_compression_level = rhs.m_compression_level;
-		m_error = rhs.m_error;
 
 		this->setp(m_in_buffer.data(), m_in_buffer.data() + m_in_buffer.size());
-		this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
+		if (rhs.pbase() != nullptr and rhs.pptr() != nullptr)
+			this->sputn(rhs.pbase(), rhs.pptr() - rhs.pbase());
 		rhs.setp(nullptr, nullptr);
 
 		return *this;
@@ -773,13 +1036,13 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 
 		this->setp(nullptr, nullptr);
 
-		return m_error ? nullptr : this;
+		return this->m_has_error ? nullptr : this;
 	}
 
 	/// \brief Set the compression level, 0 (no compression) to 9 (maximum compression)
 	void set_compression_level(int level) noexcept override
 	{
-		m_compression_level = level;
+		m_compression_level = std::clamp(level, 0, 9);
 	}
 
 	/// \brief Initialize the internal lzma structures
@@ -790,11 +1053,16 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 	/// a gzip header.
 	base_type *init(streambuf_type *upstream) override
 	{
-		this->set_upstream(upstream);
+		if (upstream == nullptr)
+			return nullptr;
 
-		m_error = false;
-
+		// Finish and tear down any existing stream while the old upstream is
+		// still installed. Otherwise buffered data would be flushed to the new
+		// upstream. Only then start a clean session on the new upstream.
 		close();
+
+		this->set_upstream(upstream);
+		this->m_has_error = false;
 
 		m_xzstream.reset(new lzma_stream);
 
@@ -816,7 +1084,7 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 	///
 	int_type overflow(int_type ch) override
 	{
-		if (not m_xzstream)
+		if (not m_xzstream or this->m_has_error or this->pbase() == nullptr)
 			return traits_type::eof();
 
 		auto &zstream = *m_xzstream;
@@ -825,6 +1093,8 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 		zstream.avail_in = this->pptr() - this->pbase();
 
 		char_type buffer[BufferSize];
+
+		bool failed = false;
 
 		for (;;)
 		{
@@ -840,7 +1110,7 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 
 				if (r != n)
 				{
-					m_error = true;
+					this->set_error();
 					return traits_type::eof();
 				}
 			}
@@ -854,12 +1124,18 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 					continue;
 			}
 			else if (err != LZMA_STREAM_END)
-				m_error = true;
+			{
+				this->set_error();
+				failed = true;
+			}
 
 			break;
 		}
 
 		this->setp(this->m_in_buffer.data(), this->m_in_buffer.data() + this->m_in_buffer.size());
+
+		if (failed or this->m_has_error)
+			return traits_type::eof();
 
 		if (not traits_type::eq_int_type(ch, traits_type::eof()))
 		{
@@ -870,6 +1146,65 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 		return ch;
 	}
 
+	/// \brief Flush the pending input through liblzma and out to the upstream
+	///
+	/// Unlike close(), this does not finish the compressed stream; writing can
+	/// continue afterwards.
+	int sync() override
+	{
+		if (this->m_has_error)
+			return -1;
+
+		if (not m_xzstream)
+			return 0;
+
+		if (this->pbase() == nullptr or this->pptr() == nullptr)
+			return -1;
+
+		auto &zstream = *m_xzstream;
+
+		zstream.next_in = reinterpret_cast<unsigned char *>(this->pbase());
+		zstream.avail_in = this->pptr() - this->pbase();
+
+		char_type buffer[BufferSize];
+
+		for (;;)
+		{
+			zstream.next_out = reinterpret_cast<unsigned char *>(buffer);
+			zstream.avail_out = sizeof(buffer);
+
+			int err = ::lzma_code(&zstream, LZMA_SYNC_FLUSH);
+
+			std::streamsize n = sizeof(buffer) - zstream.avail_out;
+			if (n > 0 and this->m_upstream->sputn(reinterpret_cast<char_type *>(buffer), n) != n)
+			{
+				this->set_error();
+				return -1;
+			}
+
+			// For an encoder, LZMA_STREAM_END after LZMA_SYNC_FLUSH means the
+			// flush request completed; the stream itself is still alive.
+			if (err == LZMA_STREAM_END)
+				break;
+
+			if (err != LZMA_OK)
+			{
+				this->set_error();
+				return -1;
+			}
+		}
+
+		this->setp(this->m_in_buffer.data(), this->m_in_buffer.data() + this->m_in_buffer.size());
+
+		if (this->m_upstream->pubsync() != 0)
+		{
+			this->set_error();
+			return -1;
+		}
+
+		return 0;
+	}
+
   private:
 	/// \brief The lzma internal structures are maintained as pointers to avoid having
 	/// to copy their content in move constructors.
@@ -878,8 +1213,6 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 	/// \brief The compression level used, 0 (none) to 9 (maximum)
 	int m_compression_level = kDefaultCompressionLevel;
 
-	/// \brief Set when a write to the upstream failed, so close() can report the error
-	bool m_error = false;
 
 	/// \brief Input buffer, this is the input for lzma
 	std::array<char_type, BufferSize> m_in_buffer;
@@ -912,8 +1245,10 @@ class basic_prefix_streambuf : public std::basic_streambuf<CharT, Traits>
 	basic_prefix_streambuf(streambuf_type *upstream, const char_type *prefix, std::streamsize length) noexcept
 		: m_upstream(upstream)
 	{
-		std::copy(prefix, prefix + length, m_prefix.begin());
-		this->setg(m_prefix.data(), m_prefix.data(), m_prefix.data() + length);
+		const auto max_length = static_cast<std::streamsize>(m_prefix.size());
+		const auto count = std::clamp(length, std::streamsize{ 0 }, max_length);
+		std::copy(prefix, prefix + count, m_prefix.begin());
+		this->setg(m_prefix.data(), m_prefix.data(), m_prefix.data() + count);
 	}
 
   protected:
@@ -925,7 +1260,7 @@ class basic_prefix_streambuf : public std::basic_streambuf<CharT, Traits>
 		if (m_upstream == nullptr)
 			return traits_type::eof();
 
-		std::streamsize n = m_upstream->sgetn(m_buffer.data(), m_buffer.size());
+		std::streamsize n = detail::sgetn(m_upstream, m_buffer);
 
 		if (n == 0)
 			return traits_type::eof();
@@ -978,11 +1313,14 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 
 	/// \brief Regular move constructor
 	basic_istream(basic_istream &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		m_gxriobuf = std::move(rhs.m_gxriobuf);
 		m_upstream_buf = std::move(rhs.m_upstream_buf);
 		m_upstream = rhs.m_upstream;
+
+		if (m_gxriobuf)
+			m_gxriobuf->set_ios(this);
 
 		this->rdbuf(m_gxriobuf ? m_gxriobuf.get() : m_upstream);
 	}
@@ -990,10 +1328,16 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 	/// \brief Regular move operator=
 	basic_istream &operator=(basic_istream &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		if (this == &rhs)
+			return *this;
+
+		base_type::operator=(static_cast<base_type &&>(rhs));
 		m_gxriobuf = std::move(rhs.m_gxriobuf);
 		m_upstream_buf = std::move(rhs.m_upstream_buf);
 		m_upstream = rhs.m_upstream;
+
+		if (m_gxriobuf)
+			m_gxriobuf->set_ios(this);
 
 		this->rdbuf(m_gxriobuf ? m_gxriobuf.get() : m_upstream);
 
@@ -1031,6 +1375,7 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 	{
 		if (sb == nullptr)
 		{
+			this->clear();
 			this->setstate(std::ios_base::failbit);
 			return;
 		}
@@ -1063,7 +1408,6 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 				}
 			}
 		}
-#if HAVE_LibLZMA
 		else if (ch == 0xfd)
 		{
 			// xz magic: 0xfd '7' 'z' 'X' 'Z' 0x00
@@ -1079,9 +1423,18 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 			}
 
 			if (signature_length == kXZMagicLength)
+			{
+#if HAVE_LibLZMA
 				m_gxriobuf.reset(new xz_streambuf_type);
-		}
+#else
+				// xz data cannot be decoded in this build. Detaching rdbuf sets
+				// badbit instead of returning the compressed bytes, and clear()
+				// cannot make a stream without an rdbuf readable again.
+				this->rdbuf(nullptr);
+				return;
 #endif
+			}
+		}
 
 		if (m_gxriobuf)
 		{
@@ -1091,7 +1444,10 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 			if (not m_gxriobuf->init(m_upstream))
 				this->setstate(std::ios_base::failbit);
 			else
+			{
+				m_gxriobuf->set_ios(this);
 				this->init(m_gxriobuf.get());
+			}
 		}
 		else if (signature_length > 0)
 		{
@@ -1147,12 +1503,19 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 #endif
 
 	/// \brief Default constructor, does not open a file since none is specified
-	basic_ifstream() = default;
+	basic_ifstream()
+	{
+		this->rdbuf(&m_filebuf);
+		this->m_upstream = &m_filebuf;
+		this->clear();
+	}
 
 	~basic_ifstream()
 	{
+		// Do not report close failures through setstate() here: that can throw
+		// for a stream with exceptions enabled, and destructors must not throw.
 		if (is_open())
-			close();
+			close_impl(false);
 	}
 
 	/// \brief Construct an ifstream
@@ -1160,6 +1523,7 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 	/// \param mode The mode in which to open the file
 
 	explicit basic_ifstream(const char *filename, std::ios_base::openmode mode = std::ios_base::in)
+		: basic_ifstream()
 	{
 		open(filename, mode);
 	}
@@ -1169,6 +1533,7 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 	/// \param mode The mode in which to open the file
 
 	explicit basic_ifstream(const std::string &filename, std::ios_base::openmode mode = std::ios_base::in)
+		: basic_ifstream()
 	{
 		open(filename, mode);
 	}
@@ -1178,19 +1543,23 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 	/// \param mode The mode in which to open the file
 
 	explicit basic_ifstream(const std::filesystem::path &filename, std::ios_base::openmode mode = std::ios_base::in)
+		: basic_ifstream()
 	{
 		open(filename, mode);
 	}
 
 	/// \brief Move constructor
 	basic_ifstream(basic_ifstream &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		m_filebuf = std::move(rhs.m_filebuf);
 		this->m_upstream = &m_filebuf;
 
 		if (this->m_gxriobuf)
+		{
 			this->m_gxriobuf->set_upstream(&m_filebuf);
+			this->m_gxriobuf->set_ios(this);
+		}
 		else
 			this->rdbuf(&m_filebuf);
 	}
@@ -1202,13 +1571,19 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 	/// \brief Move version of operator=
 	basic_ifstream &operator=(basic_ifstream &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		if (this == &rhs)
+			return *this;
+
+		base_type::operator=(static_cast<base_type &&>(rhs));
 
 		m_filebuf = std::move(rhs.m_filebuf);
 		this->m_upstream = &m_filebuf;
 
 		if (this->m_gxriobuf)
+		{
 			this->m_gxriobuf->set_upstream(&m_filebuf);
+			this->m_gxriobuf->set_ios(this);
+		}
 		else
 			this->rdbuf(&m_filebuf);
 
@@ -1221,6 +1596,19 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 
 	void open(const std::filesystem::path &filename, std::ios_base::openmode mode = std::ios_base::in)
 	{
+#if !HAVE_LibLZMA
+		if (filename.extension() == ".xz")
+		{
+			// Reject unsupported input before touching the file. Detaching
+			// rdbuf sets badbit and stops clear() from making the stream return
+			// the still-compressed bytes.
+			this->m_gxriobuf.reset(nullptr);
+			this->rdbuf(nullptr);
+			this->m_upstream = nullptr;
+			return;
+		}
+#endif
+
 		if (not m_filebuf.open(filename, mode | std::ios::binary))
 			this->setstate(std::ios_base::failbit);
 		else
@@ -1242,9 +1630,18 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 				this->clear();
 			}
 			else if (not this->m_gxriobuf->init(&m_filebuf))
+			{
+				// Do not leave rdbuf() pointing at a compressor that is about
+				// to be destroyed. Close the file and fall back to the filebuf.
+				this->rdbuf(&m_filebuf);
+				this->m_upstream = &m_filebuf;
+				m_filebuf.close();
+				this->m_gxriobuf.reset(nullptr);
 				this->setstate(std::ios_base::failbit);
+			}
 			else
 			{
+				this->m_gxriobuf->set_ios(this);
 				this->rdbuf(this->m_gxriobuf.get());
 				this->clear();
 			}
@@ -1283,11 +1680,7 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 
 	void close()
 	{
-		if (this->m_gxriobuf and not this->m_gxriobuf->close())
-			this->setstate(std::ios_base::failbit);
-
-		if (not m_filebuf.close())
-			this->setstate(std::ios_base::failbit);
+		close_impl(true);
 	}
 
 	/// \brief Swap the contents with those of \a rhs
@@ -1302,6 +1695,7 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 		if (this->m_gxriobuf)
 		{
 			this->m_gxriobuf->set_upstream(&m_filebuf);
+			this->m_gxriobuf->set_ios(this);
 			this->rdbuf(this->m_gxriobuf.get());
 		}
 		else
@@ -1312,6 +1706,7 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 		if (rhs.m_gxriobuf)
 		{
 			rhs.m_gxriobuf->set_upstream(&rhs.m_filebuf);
+			rhs.m_gxriobuf->set_ios(&rhs);
 			rhs.rdbuf(rhs.m_gxriobuf.get());
 		}
 		else
@@ -1321,6 +1716,24 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 	}
 
   private:
+	/// \brief Close the compressor and the file
+	///
+	/// When \a report_error is false, failures are not reported through
+	/// setstate(), which keeps the destructor path from throwing.
+	void close_impl(bool report_error)
+	{
+		bool failed = false;
+
+		if (this->m_gxriobuf and not this->m_gxriobuf->close())
+			failed = true;
+
+		if (not m_filebuf.close())
+			failed = true;
+
+		if (report_error and failed)
+			this->setstate(std::ios_base::failbit);
+	}
+
 	/// \brief The filebuf
 	filebuf_type m_filebuf;
 };
@@ -1348,9 +1761,23 @@ class basic_ostream : public std::basic_ostream<CharT, Traits>
 	using z_streambuf_type = basic_streambuf<char_type, traits_type>;
 	using upstreambuf_type = std::basic_streambuf<char_type, traits_type>;
 
+	/// \brief Construct an ostream that writes uncompressed data to \a buf
+	///
+	/// No compression is applied; use gxrio::ofstream or a compressing
+	/// streambuf when compressed output is required.
+	explicit basic_ostream(upstreambuf_type *buf)
+		: base_type(buf), m_upstream(buf)
+	{
+		if (buf == nullptr)
+		{
+			this->clear();
+			this->setstate(std::ios_base::failbit);
+		}
+	}
+
 	/// \brief Regular move constructor
 	basic_ostream(basic_ostream &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		m_gxriobuf = std::move(rhs.m_gxriobuf);
 		m_upstream = rhs.m_upstream;
@@ -1361,7 +1788,10 @@ class basic_ostream : public std::basic_ostream<CharT, Traits>
 	/// \brief Regular move operator=
 	basic_ostream &operator=(basic_ostream &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		if (this == &rhs)
+			return *this;
+
+		base_type::operator=(static_cast<base_type &&>(rhs));
 		m_gxriobuf = std::move(rhs.m_gxriobuf);
 		m_upstream = rhs.m_upstream;
 
@@ -1373,13 +1803,6 @@ class basic_ostream : public std::basic_ostream<CharT, Traits>
   protected:
 	basic_ostream()
 		: base_type(nullptr) {}
-
-	/// \brief Initialise internals with streambuf \a sb
-	void init_z(upstreambuf_type *sb)
-	{
-		if (not m_gxriobuf->init(sb))
-			this->setstate(std::ios_base::failbit);
-	}
 
   protected:
 	/// \brief Our streambuf class
@@ -1396,7 +1819,7 @@ class basic_ostream : public std::basic_ostream<CharT, Traits>
 /// \tparam CharT		Type of the character stream.
 /// \tparam Traits		Traits for character type, defaults to char_traits<_CharT>.
 ///
-/// This is an ofstream implementation that can writeto named files compressing the content
+/// This is an ofstream implementation that can write to named files compressing the content
 /// with gzip directly. The class inherits from std::basic_ostream and offers all the
 /// associated functionality.
 
@@ -1415,12 +1838,20 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	using xz_streambuf_type = basic_oxz_streambuf<char_type, traits_type>;
 #endif
 
-	basic_ofstream() = default;
+	/// \brief Default constructor, does not open a file since none is specified
+	basic_ofstream()
+	{
+		this->rdbuf(&m_filebuf);
+		this->m_upstream = &m_filebuf;
+		this->clear();
+	}
 
 	~basic_ofstream()
 	{
+		// Do not report close failures through setstate() here: that can throw
+		// for a stream with exceptions enabled, and destructors must not throw.
 		if (is_open())
-			close();
+			close_impl(false);
 	}
 
 	/// \brief Construct an ofstream
@@ -1428,6 +1859,7 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	/// \param mode The mode in which to open the file
 
 	explicit basic_ofstream(const char *filename, std::ios_base::openmode mode = std::ios_base::out)
+		: basic_ofstream()
 	{
 		open(filename, mode);
 	}
@@ -1437,6 +1869,7 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	/// \param mode The mode in which to open the file
 
 	explicit basic_ofstream(const std::string &filename, std::ios_base::openmode mode = std::ios_base::out)
+		: basic_ofstream()
 	{
 		open(filename, mode);
 	}
@@ -1446,19 +1879,24 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	/// \param mode The mode in which to open the file
 
 	explicit basic_ofstream(const std::filesystem::path &filename, std::ios_base::openmode mode = std::ios_base::out)
+		: basic_ofstream()
 	{
 		open(filename, mode);
 	}
 
 	/// \brief Move constructor
 	basic_ofstream(basic_ofstream &&rhs) noexcept
-		: base_type(std::move(rhs))
+		: base_type(static_cast<base_type &&>(rhs))
 	{
 		m_filebuf = std::move(rhs.m_filebuf);
 		this->m_upstream = &m_filebuf;
+		m_compression_level = rhs.m_compression_level;
 
 		if (this->m_gxriobuf)
+		{
 			this->m_gxriobuf->set_upstream(&m_filebuf);
+			this->m_gxriobuf->set_ios(this);
+		}
 		else
 			this->rdbuf(&m_filebuf);
 	}
@@ -1470,12 +1908,19 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	/// \brief Move operator=
 	basic_ofstream &operator=(basic_ofstream &&rhs) noexcept
 	{
-		base_type::operator=(std::move(rhs));
+		if (this == &rhs)
+			return *this;
+
+		base_type::operator=(static_cast<base_type &&>(rhs));
 		m_filebuf = std::move(rhs.m_filebuf);
 		this->m_upstream = &m_filebuf;
+		m_compression_level = rhs.m_compression_level;
 
 		if (this->m_gxriobuf)
+		{
 			this->m_gxriobuf->set_upstream(&m_filebuf);
+			this->m_gxriobuf->set_ios(this);
+		}
 		else
 			this->rdbuf(&m_filebuf);
 
@@ -1491,10 +1936,10 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 
 	void set_compression_level(int level)
 	{
-		m_compression_level = level;
+		m_compression_level = std::clamp(level, 0, 9);
 
 		if (this->m_gxriobuf)
-			this->m_gxriobuf->set_compression_level(level);
+			this->m_gxriobuf->set_compression_level(m_compression_level);
 	}
 
 	/// \brief Open the file \a filename with mode \a mode
@@ -1507,6 +1952,19 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 
 	void open(const std::filesystem::path &filename, std::ios_base::openmode mode = std::ios_base::out)
 	{
+#if !HAVE_LibLZMA
+		if (filename.extension() == ".xz")
+		{
+			// Reject unsupported output before creating or truncating the
+			// destination file. Detaching rdbuf sets badbit and stops clear()
+			// from making the stream writable again.
+			this->m_gxriobuf.reset(nullptr);
+			this->rdbuf(nullptr);
+			this->m_upstream = nullptr;
+			return;
+		}
+#endif
+
 		if (not m_filebuf.open(filename, mode | std::ios::binary))
 			this->setstate(std::ios_base::failbit);
 		else
@@ -1527,9 +1985,19 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 				this->m_gxriobuf->set_compression_level(m_compression_level);
 
 				if (not this->m_gxriobuf->init(&m_filebuf))
+				{
+					// Do not leave rdbuf() pointing at a compressor that is
+					// about to be destroyed. Close the file and fall back to
+					// the filebuf.
+					this->rdbuf(&m_filebuf);
+					this->m_upstream = &m_filebuf;
+					m_filebuf.close();
+					this->m_gxriobuf.reset(nullptr);
 					this->setstate(std::ios_base::failbit);
+				}
 				else
 				{
+					this->m_gxriobuf->set_ios(this);
 					this->rdbuf(this->m_gxriobuf.get());
 					this->clear();
 				}
@@ -1582,10 +2050,17 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 
 	void close()
 	{
+		bool failed = false;
+
 		if (this->m_gxriobuf and not this->m_gxriobuf->close())
-			this->setstate(std::ios_base::failbit);
+			failed = true;
 
 		if (not m_filebuf.close())
+			failed = true;
+
+		// Report last: setstate() may throw when the stream has exceptions
+		// enabled, and by then both the compressor and the file must be closed.
+		if (failed)
 			this->setstate(std::ios_base::failbit);
 	}
 
@@ -1602,6 +2077,7 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 		if (this->m_gxriobuf)
 		{
 			this->m_gxriobuf->set_upstream(&m_filebuf);
+			this->m_gxriobuf->set_ios(this);
 			this->rdbuf(this->m_gxriobuf.get());
 		}
 		else
@@ -1612,6 +2088,7 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 		if (rhs.m_gxriobuf)
 		{
 			rhs.m_gxriobuf->set_upstream(&rhs.m_filebuf);
+			rhs.m_gxriobuf->set_ios(&rhs);
 			rhs.rdbuf(rhs.m_gxriobuf.get());
 		}
 		else
@@ -1621,6 +2098,24 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	}
 
   private:
+	/// \brief Close the compressor and the file
+	///
+	/// When \a report_error is false, failures are not reported through
+	/// setstate(), which keeps the destructor path from throwing.
+	void close_impl(bool report_error)
+	{
+		bool failed = false;
+
+		if (this->m_gxriobuf and not this->m_gxriobuf->close())
+			failed = true;
+
+		if (not m_filebuf.close())
+			failed = true;
+
+		if (report_error and failed)
+			this->setstate(std::ios_base::failbit);
+	}
+
 	/// \brief The filebuf
 	filebuf_type m_filebuf;
 
@@ -1632,9 +2127,8 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 
 /// \brief Convenience typedefs
 using istream = basic_istream<char, std::char_traits<char>>;
+using ostream = basic_ostream<char, std::char_traits<char>>;
 using ifstream = basic_ifstream<char, std::char_traits<char>>;
 using ofstream = basic_ofstream<char, std::char_traits<char>>;
-
-// NOLINTEND(bugprone-use-after-move)
 
 } // namespace gxrio

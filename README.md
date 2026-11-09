@@ -25,8 +25,11 @@ Requirements
 
 - A C++17 compiler
 - _zlib_ (required)
-- _liblzma_ (optional; without it the _xz_ support is compiled out and `.xz` files are
-  read and written as plain files)
+- _liblzma_ (optional; without it the _xz_ support is compiled out and attempts to
+  open `.xz` files fail by setting `badbit`, instead of reading or writing them as
+  plain files. Output files are not created or truncated in that case.)
+  When not building through CMake, the header auto-detects `<lzma.h>`; define
+  `HAVE_LibLZMA=0` or `HAVE_LibLZMA=1` to override the detection explicitly.
 
 Installation
 ------------
@@ -59,6 +62,9 @@ to have support for this.
 
 Also note that `gxrio::ifstream` decides what decompressor to use based on the file name
 extension (`.gz` or `.xz`), while `gxrio::istream` sniffs the content of the stream.
+
+Corrupt or truncated compressed input sets `badbit` on the stream. Concatenated gzip
+and xz streams, as well as xz stream padding, are supported.
 
 Opening a file for reading is as simple as:
 
@@ -108,7 +114,7 @@ You can also use another buffer as input, as in this example:
 ```
 
 Writing is similar, however, having a _gxrio::ostream_ class is not very useful. It won't know what to
-do. But a _gxrio::ofstream_ class is provided, it will decide what compression to use based on the
+do, so it writes uncompressed. But a _gxrio::ofstream_ class is provided, it will decide what compression to use based on the
 filename extension. So, writing becomes as simple as:
 
 ```cpp

@@ -5,11 +5,18 @@
 
 #include "test-main.hpp"
 
+#include <algorithm>
 #include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <memory>
+#include <random>
 #include <string>
+#include <vector>
+
+#include <zlib.h>
 
 #include <gxrio.hpp>
 
@@ -164,6 +171,11 @@ class ArrayedStreamBuffer : public std::basic_streambuf<CharT>
 
 	void reading() { Base::setg(Base::pbase(), Base::pbase(), Base::pptr()); }
 
+	std::size_t size() const
+	{
+		return static_cast<std::size_t>(Base::pptr() - Base::pbase());
+	}
+
 	int_type overflow(int_type ch)
 	{
 		return Base::overflow(ch);
@@ -201,7 +213,7 @@ TEST_CASE("round trip a 1000 line gzip file", "[d_2]")
 	auto filename = "hello-1000.txt.gz";
 
 	fs::path in_file = gTestDir / filename;
-	fs::path out_file = fs::temp_directory_path() / filename;
+	fs::path out_file = gTestTempDir / filename;
 
 	gxrio::ifstream in;
 	gxrio::ofstream out;
@@ -261,7 +273,12 @@ TEST_CASE("move an ogzip streambuf while compressing", "[d_3]")
 
 	zb2.sputn("noot ", 5);
 
+	ArrayedStreamBuffer<100> discarded;
+
 	gxrio::basic_ogzip_streambuf<char, std::char_traits<char>> zb3;
+	REQUIRE(zb3.init(&discarded) != nullptr);
+
+	zb3.sputn("old ", 4);
 
 	zb3 = std::move(zb2);
 
@@ -277,6 +294,103 @@ TEST_CASE("move an ogzip streambuf while compressing", "[d_3]")
 	std::getline(in, line);
 
 	CHECK(line == "aap noot mies");
+
+	discarded.reading();
+
+	gxrio::istream discarded_in(&discarded);
+
+	std::string old_line;
+	std::getline(discarded_in, old_line);
+
+	CHECK(old_line == "old ");
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("re-initializing an output streambuf keeps data on the old upstream", "[d_reinit]")
+{
+	ArrayedStreamBuffer<4096> first, second;
+
+	gxrio::basic_ogzip_streambuf<char, std::char_traits<char>> zb;
+	REQUIRE(zb.init(&first) != nullptr);
+	REQUIRE(zb.sputn("aap", 3) == 3);
+
+	// Re-initializing must finish the old member on the old upstream, not
+	// flush its buffered bytes to the new one.
+	REQUIRE(zb.init(&second) != nullptr);
+	REQUIRE(zb.sputn("noot", 4) == 4);
+	REQUIRE(zb.close() != nullptr);
+
+	first.reading();
+	gxrio::istream in_first(&first);
+	std::string line;
+	REQUIRE(std::getline(in_first, line));
+	CHECK(line == "aap");
+
+	second.reading();
+	gxrio::istream in_second(&second);
+	line.clear();
+	REQUIRE(std::getline(in_second, line));
+	CHECK(line == "noot");
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("gzip output write errors set badbit", "[d_error]")
+{
+	struct failing_streambuf : public std::streambuf
+	{
+		std::streamsize xsputn(const char *, std::streamsize) override
+		{
+			return 0;
+		}
+
+		int_type overflow(int_type) override
+		{
+			return traits_type::eof();
+		}
+	} sink;
+
+	gxrio::basic_ogzip_streambuf<char, std::char_traits<char>> zb;
+	std::ostream out(&zb);
+	zb.set_ios(&out);
+
+	REQUIRE(zb.init(&sink) != nullptr);
+	CHECK(zb.close() == nullptr);
+	CHECK(out.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("gzip output errors do not throw from destruction", "[d_error_exceptions]")
+{
+	struct failing_streambuf : public std::streambuf
+	{
+		std::streamsize xsputn(const char *, std::streamsize) override
+		{
+			return 0;
+		}
+
+		int_type overflow(int_type) override
+		{
+			return traits_type::eof();
+		}
+	} sink;
+
+	// The streambuf must outlive the ostream here so its destructor can still
+	// report the error to it.
+	auto zb = std::make_unique<gxrio::basic_ogzip_streambuf<char, std::char_traits<char>>>();
+	std::ostream out(zb.get());
+	zb->set_ios(&out);
+	out.exceptions(std::ios::badbit);
+
+	REQUIRE(zb->init(&sink) != nullptr);
+
+	// Flushing in the destructor hits the failing sink. With badbit exceptions
+	// enabled this used to call std::terminate.
+	zb.reset();
+
+	CHECK(out.bad());
 }
 
 // --------------------------------------------------------------------
@@ -315,22 +429,385 @@ TEST_CASE("move an igzip streambuf while decompressing", "[d_4]")
 
 TEST_CASE("set the compression level on a streambuf", "[d_5]")
 {
-	ArrayedStreamBuffer<100> buffer;
+	std::string data;
+	for (int i = 0; i < 1000; ++i)
+	{
+		data += "line " + std::to_string(i) + ": alpha bravo charlie " + std::to_string((static_cast<unsigned>(i) * 2654435761u) % 1000000) + "\n";
+	}
+
+	ArrayedStreamBuffer<65536> level0, level9;
+
+	gxrio::basic_ogzip_streambuf<char, std::char_traits<char>> z0, z9;
+
+	z0.set_compression_level(0);
+	REQUIRE(z0.init(&level0) != nullptr);
+	REQUIRE(z0.sputn(data.data(), static_cast<std::streamsize>(data.size())) ==
+		static_cast<std::streamsize>(data.size()));
+	REQUIRE(z0.close() != nullptr);
+
+	z9.set_compression_level(9);
+	REQUIRE(z9.init(&level9) != nullptr);
+	REQUIRE(z9.sputn(data.data(), static_cast<std::streamsize>(data.size())) ==
+		static_cast<std::streamsize>(data.size()));
+	REQUIRE(z9.close() != nullptr);
+
+	CHECK(level0.size() > level9.size());
+
+	level9.reading();
+
+	gxrio::istream in(&level9);
+
+	std::string line;
+	REQUIRE(std::getline(in, line));
+
+	CHECK(line == "line 0: alpha bravo charlie 0");
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("flush makes compressed data available before close", "[d_flush]")
+{
+	ArrayedStreamBuffer<65536> buffer;
 
 	gxrio::basic_ogzip_streambuf<char, std::char_traits<char>> zb;
-	zb.set_compression_level(1);
-	zb.init(&buffer);
+	REQUIRE(zb.init(&buffer) != nullptr);
 
-	zb.sputn("Hello, world!", 13);
+	std::ostream out(&zb);
+	out << "Hello, world!";
+	out.flush();
+
+	CHECK(buffer.size() > 0);
 
 	zb.close();
 
 	buffer.reading();
 
 	gxrio::istream in(&buffer);
+	std::string line;
+	REQUIRE(std::getline(in, line));
+	CHECK(line == "Hello, world!");
+	CHECK_FALSE(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("valid gzip data does not set badbit", "[d_valid]")
+{
+	gxrio::ifstream in(gTestDir / "hello.txt.gz");
+	REQUIRE(in.good());
 
 	std::string line;
-	std::getline(in, line);
+	while (std::getline(in, line))
+		;
 
-	CHECK(line == "Hello, world!");
+	CHECK(in.eof());
+	CHECK_FALSE(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("corrupt gzip data sets badbit", "[d_corrupt]")
+{
+	std::ifstream data(gTestDir / "hello.txt.gz", std::ios::binary);
+	std::vector<char> contents(
+		(std::istreambuf_iterator<char>(data)),
+		std::istreambuf_iterator<char>());
+
+	REQUIRE(contents.size() > 20);
+
+	const size_t offset = contents.size() / 2;
+	contents[offset] = static_cast<char>(contents[offset] ^ 0x5a);
+
+	struct membuf : public std::streambuf
+	{
+		membuf(std::vector<char> &data)
+		{
+			this->setg(data.data(), data.data(), data.data() + data.size());
+		}
+	} buffer(contents);
+
+	gxrio::istream in(&buffer);
+
+	std::string line;
+	while (std::getline(in, line))
+		;
+
+	CHECK(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("truncated gzip data sets badbit", "[d_truncated]")
+{
+	std::ifstream data(gTestDir / "hello.txt.gz", std::ios::binary);
+	std::vector<char> contents(
+		(std::istreambuf_iterator<char>(data)),
+		std::istreambuf_iterator<char>());
+
+	REQUIRE(contents.size() > 4);
+	contents.resize(contents.size() - 4);
+
+	struct membuf : public std::streambuf
+	{
+		membuf(std::vector<char> &data)
+		{
+			this->setg(data.data(), data.data(), data.data() + data.size());
+		}
+	} buffer(contents);
+
+	gxrio::istream in(&buffer);
+
+	std::string line;
+	while (std::getline(in, line))
+		;
+
+	CHECK(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("garbage after a gzip stream sets badbit", "[d_trailing]")
+{
+	std::vector<char> contents(std::begin(kGZippedData), std::end(kGZippedData));
+
+	const char garbage[] = { 'g', 'a', 'r', 'b', 'a', 'g', 'e' };
+	contents.insert(contents.end(), std::begin(garbage), std::end(garbage));
+
+	struct membuf : public std::streambuf
+	{
+		membuf(std::vector<char> &data)
+		{
+			this->setg(data.data(), data.data(), data.data() + data.size());
+		}
+	} buffer(contents);
+
+	gxrio::istream in(&buffer);
+
+	std::string line;
+	while (std::getline(in, line))
+		;
+
+	CHECK(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("an empty gzip stream decodes to nothing", "[d_empty]")
+{
+	gxrio::ofstream out(gTestTempDir / "empty.txt.gz");
+	REQUIRE(out.is_open());
+	out.close();
+	REQUIRE_FALSE(out.fail());
+
+	gxrio::ifstream in(gTestTempDir / "empty.txt.gz");
+	REQUIRE(in.is_open());
+
+	std::string line;
+	CHECK_FALSE(std::getline(in, line));
+	CHECK(in.eof());
+	CHECK_FALSE(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("a zero byte .gz file is truncated", "[d_empty]")
+{
+	fs::path f = gTestTempDir / "zero-bytes.txt.gz";
+	{
+		std::ofstream raw(f, std::ios::binary | std::ios::trunc);
+		REQUIRE(raw.good());
+	}
+
+	gxrio::ifstream in(f);
+	REQUIRE(in.is_open());
+
+	std::string line;
+	while (std::getline(in, line))
+		;
+
+	CHECK(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("short reads split gzip signatures and members", "[d_chunked]")
+{
+	using traits = std::char_traits<char>;
+
+	std::vector<char> single(std::begin(kGZippedData), std::end(kGZippedData));
+	std::vector<char> twice = single;
+	twice.insert(twice.end(), single.begin(), single.end());
+
+	const std::string expected_single = "Hello, world!\n";
+	const std::string expected_twice = expected_single + expected_single;
+
+	for (unsigned chunk : { 1u, 2u, 3u, 5u, 7u })
+	{
+		for (const std::vector<char> *data : { &single, &twice })
+		{
+			// A short-read upstream directly below the decompressor forces
+			// refills at arbitrary offsets, including inside member headers.
+			chunked_streambuf buffer(data->data(), data->size(), chunk_size{ chunk });
+
+			gxrio::basic_igzip_streambuf<char, traits> zb;
+			REQUIRE(zb.init(&buffer) != nullptr);
+
+			std::string got;
+			int ch;
+			while ((ch = zb.sbumpc()) != traits::eof())
+				got += static_cast<char>(ch);
+
+			CHECK_FALSE(zb.error());
+			CHECK(got == (data == &single ? expected_single : expected_twice));
+		}
+
+		// And the sniffing layer must cope with a signature split across reads.
+		chunked_streambuf buffer(single.data(), single.size(), chunk_size{ chunk });
+		gxrio::istream in(&buffer);
+		std::string line;
+		REQUIRE(std::getline(in, line));
+		CHECK(line == "Hello, world!");
+		CHECK_FALSE(in.bad());
+	}
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("gzip flush errors set badbit", "[d_flush_error]")
+{
+	struct failing_streambuf : public std::streambuf
+	{
+		std::streamsize xsputn(const char *, std::streamsize) override
+		{
+			return 0;
+		}
+
+		int_type overflow(int_type) override
+		{
+			return traits_type::eof();
+		}
+	} sink;
+
+	gxrio::basic_ogzip_streambuf<char, std::char_traits<char>> zb;
+	REQUIRE(zb.init(&sink) != nullptr);
+
+	std::ostream out(&zb);
+	zb.set_ios(&out);
+
+	out << "Hello, world!";
+	out.flush();
+
+	CHECK(zb.error());
+	CHECK(out.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("changing the compression level on an open gzip stream", "[d_live_level]")
+{
+	std::string block;
+	for (int i = 0; i < 4000; ++i)
+		block += "line " + std::to_string(i) + ": alpha bravo charlie delta echo foxtrot\n";
+
+	auto write = [&](const fs::path &f, bool change_level)
+	{
+		gxrio::ofstream out(f);
+		out.set_compression_level(0);
+		REQUIRE(out.is_open());
+		out.write(block.data(), static_cast<std::streamsize>(block.size()));
+		if (change_level)
+			out.set_compression_level(9);
+		out.write(block.data(), static_cast<std::streamsize>(block.size()));
+		out.close();
+		REQUIRE_FALSE(out.fail());
+	};
+
+	fs::path level0 = gTestTempDir / "live-level0.gz";
+	fs::path level9 = gTestTempDir / "live-level9.gz";
+
+	write(level0, false);
+	write(level9, true);
+
+	// The second half was written at level 9, so the file must be smaller.
+	CHECK(fs::file_size(level9) < fs::file_size(level0));
+
+	gxrio::ifstream in(level9);
+	REQUIRE(in.is_open());
+	std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	CHECK(got == block + block);
+	CHECK_FALSE(in.bad());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("randomized gzip round trips", "[d_random]")
+{
+	std::seed_seq seed{ 0xC0, 0xFF, 0xEE };
+	std::mt19937 rng(seed);
+
+	for (int iteration = 0; iteration < 20; ++iteration)
+	{
+		std::string data(rng() % 50000, '\0');
+
+		if (iteration % 3 == 0)
+			std::fill(data.begin(), data.end(), 'x');
+		else
+			for (char &ch : data)
+				ch = static_cast<char>(rng());
+
+		ArrayedStreamBuffer<262144> buffer;
+
+		gxrio::basic_ogzip_streambuf<char, std::char_traits<char>> zb;
+		REQUIRE(zb.init(&buffer) != nullptr);
+
+		std::size_t pos = 0;
+		while (pos < data.size())
+		{
+			std::size_t n = std::min<std::size_t>(rng() % 1000 + 1, data.size() - pos);
+			REQUIRE(zb.sputn(data.data() + pos, static_cast<std::streamsize>(n)) == static_cast<std::streamsize>(n));
+			pos += n;
+		}
+		REQUIRE(zb.close() != nullptr);
+
+		buffer.reading();
+
+		gxrio::istream in(&buffer);
+		std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+		CHECK(got == data);
+		CHECK_FALSE(in.bad());
+	}
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("gzip output is readable by zlib", "[d_differential]")
+{
+	std::string data;
+	for (int i = 0; i < 2000; ++i)
+		data += "line " + std::to_string(i) + ": alpha bravo charlie\n";
+
+	fs::path f = gTestTempDir / "differential.txt.gz";
+	{
+		gxrio::ofstream out(f);
+		out.set_compression_level(6);
+		REQUIRE(out.is_open());
+		out << data;
+		out.close();
+		REQUIRE_FALSE(out.fail());
+	}
+
+	std::string path = f.string();
+	gzFile gz = gzopen(path.c_str(), "rb");
+	REQUIRE(gz != nullptr);
+
+	std::string got;
+	char chunk[4096];
+	int n;
+	while ((n = gzread(gz, chunk, sizeof(chunk))) > 0)
+		got.append(chunk, static_cast<std::size_t>(n));
+
+	CHECK(n == 0);
+	CHECK(gzclose(gz) == Z_OK);
+	CHECK(got == data);
 }

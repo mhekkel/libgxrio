@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -48,7 +50,7 @@ TEST_CASE("reading compressed and uncompressed files", "[t_1]")
 	{
 		std::filebuf fb;
 		fb.open(f, std::ios::in | std::ios::binary);
-		CHECK(fb.is_open());
+		REQUIRE(fb.is_open());
 
 		gxrio::istream is(&fb);
 
@@ -72,7 +74,7 @@ TEST_CASE("reading compressed and uncompressed files via ifstream", "[t_2]")
 			 gTestDir / "hello.txt" })
 	{
 		gxrio::ifstream is(f);
-		CHECK(is.is_open());
+		REQUIRE(is.is_open());
 
 		std::string line;
 
@@ -94,10 +96,10 @@ TEST_CASE("move constructing an ifstream", "[t_3]")
 			 gTestDir / "hello.txt" })
 	{
 		gxrio::ifstream is1(f);
-		CHECK(is1.is_open());
+		REQUIRE(is1.is_open());
 
 		gxrio::ifstream is2(std::move(is1));
-		CHECK(is2.is_open());
+		REQUIRE(is2.is_open());
 
 		std::string line;
 
@@ -119,12 +121,12 @@ TEST_CASE("move assigning an ifstream", "[t_4]")
 			 gTestDir / "hello.txt" })
 	{
 		gxrio::ifstream is1(f);
-		CHECK(is1.is_open());
+		REQUIRE(is1.is_open());
 
 		gxrio::ifstream is2;
 
 		is2 = std::move(is1);
-		CHECK(is2.is_open());
+		REQUIRE(is2.is_open());
 
 		std::string line;
 
@@ -138,23 +140,21 @@ TEST_CASE("move assigning an ifstream", "[t_4]")
 
 TEST_CASE("writing and reading back compressed files", "[t_5]")
 {
-	std::filesystem::create_directories(std::filesystem::temp_directory_path() / "gxrio-unit-test");
-
 	for (fs::path f : {
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt.gz",
+			 gTestTempDir / "hello.txt.gz",
 #if HAVE_LibLZMA
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt.xz",
+			 gTestTempDir / "hello.txt.xz",
 #endif
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt" })
+			 gTestTempDir / "hello.txt" })
 	{
 		gxrio::ofstream out(f);
-		CHECK(out.is_open());
+		REQUIRE(out.is_open());
 
 		out << "Hello, world!" << std::endl;
 		out.close();
 
 		gxrio::ifstream in(f);
-		CHECK(in.is_open());
+		REQUIRE(in.is_open());
 
 		std::string line;
 
@@ -168,20 +168,19 @@ TEST_CASE("writing and reading back compressed files", "[t_5]")
 
 TEST_CASE("move constructing an ofstream", "[t_6]")
 {
-	std::filesystem::create_directories(std::filesystem::temp_directory_path() / "gxrio-unit-test");
 
 	for (fs::path f : {
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt.gz",
+			 gTestTempDir / "hello.txt.gz",
 #if HAVE_LibLZMA
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt.xz",
+			 gTestTempDir / "hello.txt.xz",
 #endif
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt" })
+			 gTestTempDir / "hello.txt" })
 	{
 		gxrio::ofstream out_1(f);
-		CHECK(out_1.is_open());
+		REQUIRE(out_1.is_open());
 
 		gxrio::ofstream out_2(std::move(out_1));
-		CHECK(out_2.is_open());
+		REQUIRE(out_2.is_open());
 
 		out_2 << "Hello, world!" << std::endl;
 		out_2.close();
@@ -200,21 +199,19 @@ TEST_CASE("move constructing an ofstream", "[t_6]")
 
 TEST_CASE("move assigning an ofstream", "[t_7]")
 {
-	std::filesystem::create_directories(std::filesystem::temp_directory_path() / "gxrio-unit-test");
-
 	for (fs::path f : {
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt.gz",
+			 gTestTempDir / "hello.txt.gz",
 #if HAVE_LibLZMA
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt.xz",
+			 gTestTempDir / "hello.txt.xz",
 #endif
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "hello.txt" })
+			 gTestTempDir / "hello.txt" })
 	{
 		gxrio::ofstream out_1(f);
-		CHECK(out_1.is_open());
+		REQUIRE(out_1.is_open());
 
 		gxrio::ofstream out_2;
 		out_2 = std::move(out_1);
-		CHECK(out_2.is_open());
+		REQUIRE(out_2.is_open());
 
 		out_2 << "Hello, world!" << std::endl;
 		out_2.close();
@@ -255,10 +252,7 @@ TEST_CASE("sniffing the format of a stream", "[t_8]")
 		std::string line;
 		std::getline(in, line);
 
-		CHECK(line.length() >= 13);
-		if (line.length() < 13)
-			continue;
-
+		REQUIRE(line.length() >= 13);
 		CHECK(line.compare(line.length() - 13, 13, "Hello, world!") == 0);
 	}
 }
@@ -282,9 +276,7 @@ TEST_CASE("swapping ifstream objects", "[t_9]")
 
 	CHECK(line == "Hello, world!");
 
-	std::filesystem::create_directories(std::filesystem::temp_directory_path() / "gxrio-unit-test");
-
-	fs::path out_file = std::filesystem::temp_directory_path() / "gxrio-unit-test" / "swap-out.txt.gz";
+	fs::path out_file = gTestTempDir / "swap-out.txt.gz";
 
 	gxrio::ofstream out_1, out_2(out_file);
 	out_1.swap(out_2);
@@ -305,31 +297,221 @@ TEST_CASE("reopening with a different extension", "[t_10]")
 	// reopening with a different extension must drop any stale decompressor
 	gxrio::ifstream in;
 	in.open(gTestDir / "hello.txt.gz");
+	REQUIRE(in.is_open());
 
 	std::string line;
-	getline(in, line);
+	REQUIRE(std::getline(in, line));
 	CHECK(line == "Hello, world!");
+	CHECK_FALSE(in.bad());
 
+	in.close();
 	in.open(gTestDir / "hello.txt");
-	getline(in, line);
+	REQUIRE(in.is_open());
+	line.clear();
+	REQUIRE(std::getline(in, line));
+	CHECK(line == "Hello, world!");
+	CHECK_FALSE(in.bad());
+
+	// and the other direction: plain first, compressed second
+	in.close();
+	in.open(gTestDir / "hello.txt");
+	REQUIRE(in.is_open());
+	line.clear();
+	REQUIRE(std::getline(in, line));
 	CHECK(line == "Hello, world!");
 
-	std::filesystem::create_directories(std::filesystem::temp_directory_path() / "gxrio-unit-test");
+	in.close();
+	in.open(gTestDir / "hello.txt.gz");
+	REQUIRE(in.is_open());
+	line.clear();
+	REQUIRE(std::getline(in, line));
+	CHECK(line == "Hello, world!");
+	CHECK_FALSE(in.bad());
 
-	fs::path out_dir = std::filesystem::temp_directory_path() / "gxrio-unit-test";
+	fs::path out_dir = gTestTempDir;
 
 	gxrio::ofstream out;
 	out.open(out_dir / "reopen.txt.gz");
+	REQUIRE(out.is_open());
 	out << "Hello, world!" << std::endl;
 	out.close();
 
 	out.open(out_dir / "reopen.txt");
+	REQUIRE(out.is_open());
 	out << "Hello, world!" << std::endl;
 	out.close();
 
+	// Verify with a plain ifstream that the .txt file really is uncompressed;
+	// gxrio detects compression by content and would otherwise hide a stale
+	// compressor here.
+	std::ifstream raw_txt(out_dir / "reopen.txt", std::ios::binary);
+	std::string contents(
+		(std::istreambuf_iterator<char>(raw_txt)),
+		std::istreambuf_iterator<char>());
+	CHECK(contents == "Hello, world!\n");
+
+	// The reverse direction must work as well.
+	out.open(out_dir / "reopen.txt");
+	REQUIRE(out.is_open());
+	out << "Hello, world!" << std::endl;
+	out.close();
+
+	out.open(out_dir / "reopen.txt.gz");
+	REQUIRE(out.is_open());
+	out << "Hello, world!" << std::endl;
+	out.close();
+
+	std::ifstream raw_gz(out_dir / "reopen.txt.gz", std::ios::binary);
+	unsigned char magic[2] = {};
+	raw_gz.read(reinterpret_cast<char *>(magic), sizeof(magic));
+	REQUIRE(raw_gz.gcount() == static_cast<std::streamsize>(sizeof(magic)));
+	CHECK(magic[0] == 0x1f);
+	CHECK(magic[1] == 0x8b);
+
 	gxrio::ifstream in_2(out_dir / "reopen.txt");
-	getline(in_2, line);
+	REQUIRE(in_2.is_open());
+	line.clear();
+	REQUIRE(std::getline(in_2, line));
 	CHECK(line == "Hello, world!");
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("default constructed streams are good", "[t_default]")
+{
+	// like the standard streams, default construction must not put the stream
+	// in a failed state
+	gxrio::ifstream in;
+	gxrio::ofstream out;
+
+	CHECK(in.good());
+	CHECK(out.good());
+	CHECK(in.rdbuf() != nullptr);
+	CHECK(out.rdbuf() != nullptr);
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("a failed open sets failbit but not badbit", "[t_default]")
+{
+	auto missing_dir = gTestTempDir / "missing-dir";
+	fs::remove_all(missing_dir);
+
+	gxrio::ifstream in;
+	in.open(missing_dir / "does-not-exist.txt.gz");
+	CHECK(in.fail());
+	CHECK_FALSE(in.bad());
+
+	gxrio::ofstream out;
+	out.open(missing_dir / "does-not-exist.txt.gz");
+	CHECK(out.fail());
+	CHECK_FALSE(out.bad());
+
+	gxrio::ifstream in_2(missing_dir / "does-not-exist.txt.gz");
+	CHECK(in_2.fail());
+	CHECK_FALSE(in_2.bad());
+
+	gxrio::ofstream out_2(missing_dir / "does-not-exist.txt.gz");
+	CHECK(out_2.fail());
+	CHECK_FALSE(out_2.bad());
+}
+
+// --------------------------------------------------------------------
+
+#if !HAVE_LibLZMA
+TEST_CASE("xz streams are rejected without LibLZMA", "[t_no_lzma]")
+{
+	auto out_dir = gTestTempDir;
+
+	gxrio::ifstream in(gTestDir / "hello.txt.xz");
+	CHECK(in.fail());
+	CHECK(in.bad());
+	CHECK_FALSE(in.is_open());
+
+	fs::path rejected = out_dir / "no-lzma.txt.xz";
+	fs::remove(rejected);
+
+	gxrio::ofstream out(rejected);
+	CHECK(out.fail());
+	CHECK(out.bad());
+	CHECK_FALSE(out.is_open());
+	CHECK_FALSE(fs::exists(rejected));
+
+	fs::path preserved = out_dir / "no-lzma-preserved.txt.xz";
+	{
+		std::ofstream keep(preserved, std::ios::binary | std::ios::trunc);
+		keep << "keep";
+	}
+
+	gxrio::ofstream out_2(preserved);
+	CHECK(out_2.fail());
+	CHECK(out_2.bad());
+	CHECK(fs::file_size(preserved) == 4);
+
+	// content sniffing through a plain streambuf must fail as well instead of
+	// silently returning the compressed bytes
+	std::ifstream raw(gTestDir / "hello.txt.xz", std::ios::binary);
+	gxrio::istream in_2(raw.rdbuf());
+	CHECK(in_2.fail());
+	CHECK(in_2.bad());
+	CHECK(in_2.rdbuf() == nullptr);
+
+	// clear() must not turn the rejected stream into a readable one
+	in_2.clear();
+	CHECK(in_2.bad());
+
+	std::string line;
+	CHECK_FALSE(static_cast<bool>(std::getline(in_2, line)));
+}
+#endif
+
+// --------------------------------------------------------------------
+
+TEST_CASE("moving default and closed streambufs is safe", "[t_move_streambuf]")
+{
+	using traits = std::char_traits<char>;
+
+	using gzip_in = gxrio::basic_igzip_streambuf<char, traits>;
+	using gzip_out = gxrio::basic_ogzip_streambuf<char, traits>;
+
+	gzip_in in;
+	CHECK(in.init(nullptr) == nullptr);
+
+	gzip_in in_2(std::move(in));
+	in = std::move(in_2);
+
+	std::stringbuf sink;
+	gzip_out out;
+	CHECK(out.init(nullptr) == nullptr);
+	REQUIRE(out.init(&sink) != nullptr);
+	out.sputn("Hello, world!", 13);
+	out.close();
+
+	gzip_out out_2(std::move(out));
+	gzip_out out_3;
+	out_3 = std::move(out_2);
+
+#if HAVE_LibLZMA
+	using xz_in = gxrio::basic_ixz_streambuf<char, traits>;
+	using xz_out = gxrio::basic_oxz_streambuf<char, traits>;
+
+	xz_in xin;
+	CHECK(xin.init(nullptr) == nullptr);
+
+	xz_in xin_2(std::move(xin));
+	xin = std::move(xin_2);
+
+	std::stringbuf xsink;
+	xz_out xout;
+	CHECK(xout.init(nullptr) == nullptr);
+	REQUIRE(xout.init(&xsink) != nullptr);
+	xout.sputn("Hello, world!", 13);
+	xout.close();
+
+	xz_out xout_2(std::move(xout));
+	xz_out xout_3;
+	xout_3 = std::move(xout_2);
+#endif
 }
 
 // --------------------------------------------------------------------
@@ -352,7 +534,7 @@ TEST_CASE("moving an istream wrapping an uncompressed streambuf", "[t_11]")
 
 // --------------------------------------------------------------------
 
-TEST_CASE("truncated compressed input reaches eof", "[t_12]")
+TEST_CASE("truncated compressed input sets badbit", "[t_12]")
 {
 	// truncated compressed input reads what is available and hits eof without hanging
 	for (fs::path f : {
@@ -380,28 +562,30 @@ TEST_CASE("truncated compressed input reaches eof", "[t_12]")
 
 		std::string line;
 		while (getline(in, line))
-			CHECK(line.length() >= 13);
+			REQUIRE(line.length() >= 13);
 
-		CHECK(in.eof());
+		// Truncated input is an error and must be distinguishable from a clean
+		// end of the compressed stream.
+		CHECK(in.bad());
 	}
 }
 
 // --------------------------------------------------------------------
 
-TEST_CASE("corrupt input sets failbit", "[t_13]")
+TEST_CASE("corrupt compressed input sets badbit", "[t_13]")
 {
-	// corrupt input must not crash and must set failbit
+	// corrupt a valid gzip stream; decoding must stop with badbit
+	std::vector<unsigned char> data(std::begin(kGZippedData), std::end(kGZippedData));
+	data[data.size() / 2] ^= 0x5a;
+
 	struct membuf : public std::streambuf
 	{
-		membuf(std::array<char, 64> &data)
+		membuf(std::vector<unsigned char> &data)
 		{
-			this->setg(data.data(), data.data(), data.data() + data.size());
+			auto *p = reinterpret_cast<char *>(data.data());
+			this->setg(p, p, p + data.size());
 		}
-	};
-
-	std::array<char, 64> data;
-	data.fill('x');
-	membuf buffer(data);
+	} buffer(data);
 
 	gxrio::istream in(&buffer);
 
@@ -409,31 +593,142 @@ TEST_CASE("corrupt input sets failbit", "[t_13]")
 	while (getline(in, line))
 		;
 
-	CHECK((in.fail() or in.eof()));
+	CHECK(in.bad());
 }
 
 // --------------------------------------------------------------------
 
 TEST_CASE("setting the compression level", "[t_14]")
 {
-	std::filesystem::create_directories(std::filesystem::temp_directory_path() / "gxrio-unit-test");
+	auto out_dir = gTestTempDir;
 
-	for (fs::path f : {
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "level.txt.gz",
-			 std::filesystem::temp_directory_path() / "gxrio-unit-test" / "level.txt.xz" })
+	auto line_for = [](int i)
 	{
-		gxrio::ofstream out(f);
-		out.set_compression_level(1);
+		return "line " + std::to_string(i) + ": alpha bravo charlie " + std::to_string((static_cast<unsigned>(i) * 2654435761u) % 1000000);
+	};
 
+	std::string data;
+	for (int i = 0; i < 2000; ++i)
+		data += line_for(i) + "\n";
+
+	auto write_level = [&](int level, const fs::path &f)
+	{
+		gxrio::ofstream out;
+		out.set_compression_level(level);
+		out.open(f);
+		REQUIRE(out.is_open());
+		out.write(data.data(), static_cast<std::streamsize>(data.size()));
+		REQUIRE(out.good());
+		out.close();
+		REQUIRE_FALSE(out.fail());
+	};
+
+	for (const std::string &ext : { std::string(".gz"), std::string(".xz") })
+	{
+#if !HAVE_LibLZMA
+		if (ext == ".xz")
+			continue;
+#endif
+		fs::path low = out_dir / ("level0" + ext);
+		fs::path high = out_dir / ("level9" + ext);
+
+		write_level(0, low);
+		write_level(9, high);
+
+		// A higher compression level must result in a smaller file.
+		CHECK(std::filesystem::file_size(low) > std::filesystem::file_size(high));
+
+		gxrio::ifstream in(high);
+		REQUIRE(in.is_open());
+		std::string line;
+		int n = 0;
+		while (std::getline(in, line))
+		{
+			CHECK(line == line_for(n));
+			++n;
+		}
+		CHECK(n == 2000);
+		CHECK_FALSE(in.bad());
+	}
+
+	// Out-of-range levels are clamped to the documented range instead of
+	// making open() fail (and, historically, leaving rdbuf dangling).
+	{
+		fs::path f = out_dir / "level-clamped.gz";
+		gxrio::ofstream out;
+		out.set_compression_level(42);
+		out.open(f);
+		REQUIRE(out.is_open());
 		out << "Hello, world!" << std::endl;
 		out.close();
+		REQUIRE_FALSE(out.fail());
 
 		gxrio::ifstream in(f);
-
 		std::string line;
-		getline(in, line);
-
+		REQUIRE(std::getline(in, line));
 		CHECK(line == "Hello, world!");
+	}
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("moving an ofstream preserves the compression level", "[t_move_level]")
+{
+	auto out_dir = gTestTempDir;
+
+	std::string data;
+	for (int i = 0; i < 1000; ++i)
+	{
+		data += "line " + std::to_string(i) + ": alpha bravo charlie " + std::to_string((static_cast<unsigned>(i) * 2654435761u) % 1000000) + "\n";
+	}
+
+	auto write = [&](gxrio::ofstream &out, const fs::path &f)
+	{
+		out.open(f);
+		REQUIRE(out.is_open());
+		out.write(data.data(), static_cast<std::streamsize>(data.size()));
+		REQUIRE(out.good());
+		out.close();
+		REQUIRE_FALSE(out.fail());
+	};
+
+	for (const std::string &ext : { std::string(".gz"), std::string(".xz") })
+	{
+#if !HAVE_LibLZMA
+		if (ext == ".xz")
+			continue;
+#endif
+		fs::path reference = out_dir / ("moved-level0" + ext);
+		fs::path moved_ctor = out_dir / ("moved-ctor" + ext);
+		fs::path moved_assign = out_dir / ("moved-assign" + ext);
+		fs::path default_level = out_dir / ("moved-default" + ext);
+
+		{
+			gxrio::ofstream out;
+			out.set_compression_level(0);
+			write(out, reference);
+		}
+		{
+			gxrio::ofstream src;
+			src.set_compression_level(0);
+			gxrio::ofstream out(std::move(src));
+			write(out, moved_ctor);
+		}
+		{
+			gxrio::ofstream src;
+			src.set_compression_level(0);
+			gxrio::ofstream out;
+			out = std::move(src);
+			write(out, moved_assign);
+		}
+		{
+			gxrio::ofstream out;
+			write(out, default_level);
+		}
+
+		CHECK(std::filesystem::file_size(moved_ctor) == std::filesystem::file_size(reference));
+		CHECK(std::filesystem::file_size(moved_assign) == std::filesystem::file_size(reference));
+		CHECK(std::filesystem::file_size(moved_ctor) > std::filesystem::file_size(default_level));
 	}
 }
 
@@ -447,15 +742,31 @@ TEST_CASE("reading concatenated gzip members", "[t_21]")
 
 	std::string line;
 
-	CHECK(getline(file, line));
+	REQUIRE(getline(file, line));
 	CHECK(line == "aap");
 
-	CHECK(getline(file, line));
+	REQUIRE(getline(file, line));
 	CHECK(line == "noot");
 
-	CHECK(getline(file, line));
+	REQUIRE(getline(file, line));
 	CHECK(line == "mies");
 
-	CHECK(not getline(file, line));
+	REQUIRE_FALSE(getline(file, line));
 	CHECK(file.eof());
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("gxrio::ostream writes uncompressed data", "[t_ostream]")
+{
+	std::stringbuf buffer;
+
+	{
+		gxrio::ostream out(&buffer);
+		REQUIRE(out.good());
+
+		out << "Hello, world!";
+	}
+
+	CHECK(buffer.str() == "Hello, world!");
 }

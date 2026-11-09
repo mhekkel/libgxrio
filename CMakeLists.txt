@@ -77,20 +77,21 @@ add_library(gxrio::gxrio ALIAS gxrio)
 
 target_include_directories(gxrio INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-    ${ZLIB_INCLUDE_DIR}
-)
+    $<INSTALL_INTERFACE:include>)
 
 # adding header sources just helps IDEs
 target_sources(gxrio INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>$<INSTALL_INTERFACE:include>/gxrio.hpp
-)
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/include>$<INSTALL_INTERFACE:include>/gxrio.hpp)
 
 target_link_libraries(gxrio INTERFACE ${GXRIO_LIBS})
 
 set_target_properties(gxrio PROPERTIES PUBLIC_HEADER include/gxrio.hpp)
 if(LibLZMA_FOUND)
-    target_compile_definitions(gxrio INTERFACE HAVE_LibLZMA)
+    target_compile_definitions(gxrio INTERFACE HAVE_LibLZMA=1)
+else()
+    # Define this explicitly so the header does not auto-detect lzma and then
+    # fail to link when CMake did not find the library.
+    target_compile_definitions(gxrio INTERFACE HAVE_LibLZMA=0)
 endif()
 
 # installation
