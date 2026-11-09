@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(my-zcat VERSION 1.1.0 LANGUAGES CXX)
+project(my-zcat VERSION 1.2.0 LANGUAGES CXX)
 
 find_package(gxrio REQUIRED)
 
