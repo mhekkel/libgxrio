@@ -232,9 +232,9 @@ TEST_CASE("sniffing the format of a stream", "[t_8]")
 {
 	for (const auto &[text, length] : std::vector<std::tuple<const char *, size_t>>{
 			 { "Hello, world!", 13 },
-			 { (const char *)kGZippedData, sizeof(kGZippedData) },
+			 { reinterpret_cast<const char *>(kGZippedData), sizeof(kGZippedData) },
 #if HAVE_LibLZMA
-			 { (const char *)kXZData, sizeof(kXZData) },
+			 { reinterpret_cast<const char *>(kXZData), sizeof(kXZData) },
 #endif
 			 { "\xfd\x37Hello, world!", 15 },
 			 { "\x1fHello, world!", 14 } })

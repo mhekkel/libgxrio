@@ -1,0 +1,16 @@
+Checks: '-*,
+         bugprone-*,
+         -bugprone-easily-swappable-parameters,
+         cert-*,
+         modernize*,
+         -modernize-use-trailing-return-type,
+         -modernize-avoid-c-arrays,
+         -modernize-use-designated-initializers,
+         performance
+         '
+
+CheckOptions:
+  - key: bugprone-narrowing-conversions.WarnOnIntegerNarrowingConversion
+    value: false
+  - key: bugprone-narrowing-conversions.WarnOnIntegerToFloatingPointNarrowingConversion
+    value: false

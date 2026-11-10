@@ -137,7 +137,7 @@ class basic_streambuf : public std::basic_streambuf<CharT, Traits>
 	}
 
 	/// \brief Return true if a (de)compression error was encountered
-	bool error() const noexcept
+	[[nodiscard]] bool error() const noexcept
 	{
 		return m_has_error;
 	}
@@ -265,7 +265,7 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 		return *this;
 	}
 
-	~basic_igzip_streambuf()
+	~basic_igzip_streambuf() override
 	{
 		close();
 	}
@@ -306,8 +306,8 @@ class basic_igzip_streambuf : public basic_streambuf<CharT, Traits>
 		m_finished = false;
 		this->m_has_error = false;
 
-		m_zstream.reset(new z_stream_s);
-		m_gzheader.reset(new gz_header_s);
+		m_zstream = std::make_unique<z_stream_s>();
+		m_gzheader = std::make_unique<gz_header_s>();
 
 		auto &zstream = *m_zstream.get();
 		zstream = z_stream_s{};
@@ -507,7 +507,7 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 		return *this;
 	}
 
-	~basic_ogzip_streambuf()
+	~basic_ogzip_streambuf() override
 	{
 		close();
 	}
@@ -564,8 +564,8 @@ class basic_ogzip_streambuf : public basic_streambuf<CharT, Traits>
 		this->set_upstream(upstream);
 		this->m_has_error = false;
 
-		m_zstream.reset(new z_stream_s);
-		m_gzheader.reset(new gz_header_s);
+		m_zstream = std::make_unique<z_stream_s>();
+		m_gzheader = std::make_unique<gz_header_s>();
 
 		auto &zstream = *m_zstream.get();
 		zstream = z_stream_s{};
@@ -809,7 +809,7 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 		return *this;
 	}
 
-	~basic_ixz_streambuf()
+	~basic_ixz_streambuf() override
 	{
 		close();
 	}
@@ -849,7 +849,7 @@ class basic_ixz_streambuf : public basic_streambuf<CharT, Traits>
 		m_finished = false;
 		this->m_has_error = false;
 
-		m_xzstream.reset(new lzma_stream);
+		m_xzstream = std::make_unique<lzma_stream>();
 
 		auto &xzstream = *m_xzstream.get();
 		xzstream = LZMA_STREAM_INIT;
@@ -1014,7 +1014,7 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 		return *this;
 	}
 
-	~basic_oxz_streambuf()
+	~basic_oxz_streambuf() override
 	{
 		close();
 	}
@@ -1064,7 +1064,7 @@ class basic_oxz_streambuf : public basic_streambuf<CharT, Traits>
 		this->set_upstream(upstream);
 		this->m_has_error = false;
 
-		m_xzstream.reset(new lzma_stream);
+		m_xzstream = std::make_unique<lzma_stream>();
 
 		auto &zstream = *m_xzstream.get();
 		zstream = LZMA_STREAM_INIT;
@@ -1510,7 +1510,7 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 		this->clear();
 	}
 
-	~basic_ifstream()
+	~basic_ifstream() override
 	{
 		// Do not report close failures through setstate() here: that can throw
 		// for a stream with exceptions enabled, and destructors must not throw.
@@ -1669,7 +1669,7 @@ class basic_ifstream : public basic_istream<CharT, Traits>
 	/// \brief Return true if the file is open
 	/// \return m_filebuf.is_open()
 
-	bool is_open() const noexcept
+	[[nodiscard]] bool is_open() const noexcept
 	{
 		return m_filebuf.is_open();
 	}
@@ -1846,7 +1846,7 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 		this->clear();
 	}
 
-	~basic_ofstream()
+	~basic_ofstream() override
 	{
 		// Do not report close failures through setstate() here: that can throw
 		// for a stream with exceptions enabled, and destructors must not throw.
@@ -2039,7 +2039,7 @@ class basic_ofstream : public basic_ostream<CharT, Traits>
 	/// \brief Return true if the file is open
 	/// \return m_filebuf.is_open()
 
-	bool is_open() const noexcept
+	[[nodiscard]] bool is_open() const noexcept
 	{
 		return m_filebuf.is_open();
 	}

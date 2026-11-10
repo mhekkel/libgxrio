@@ -182,7 +182,6 @@ class ArrayedStreamBuffer : public std::basic_streambuf<CharT>
 	using int_type = typename Base::int_type;
 
 	ArrayedStreamBuffer()
-		: buffer_{} // value-initialize buffer_ to all zeroes
 	{
 		Base::setp(buffer_.data(), buffer_.data() + buffer_.size()); // set std::basic_streambuf
 		                                                            // put area pointers to work with 'buffer_'
@@ -193,18 +192,18 @@ class ArrayedStreamBuffer : public std::basic_streambuf<CharT>
 		Base::setg(Base::pbase(), Base::pbase(), Base::pptr());
 	}
 
-	std::size_t size() const
+	[[nodiscard]] std::size_t size() const
 	{
 		return static_cast<std::size_t>(Base::pptr() - Base::pbase());
 	}
 
-	int_type overflow(int_type ch)
+	[[nodiscard]] int_type overflow(int_type ch) override
 	{
 		return Base::overflow(ch);
 	}
 
   private:
-	std::array<char_type, SIZE> buffer_;
+	std::array<char_type, SIZE> buffer_{};
 };
 
 TEST_CASE("compress directly to a streambuf", "[d_1]")
@@ -265,8 +264,8 @@ TEST_CASE("round trip a 1000 line xz file", "[d_2]")
 
 	for (;;)
 	{
-		bool b1 = (bool)getline(in, line);
-		bool b2 = (bool)getline(in_test, test_line);
+		bool b1 = getline(in, line) ? true : false;
+		bool b2 = getline(in_test, test_line) ? true : false;
 
 		CHECK(b1 == b2);
 
