@@ -29,7 +29,8 @@ Requirements
   open `.xz` files fail by setting `badbit`, instead of reading or writing them as
   plain files. Output files are not created or truncated in that case.)
   When not building through CMake, the header auto-detects `<lzma.h>`; define
-  `HAVE_LibLZMA=0` or `HAVE_LibLZMA=1` to override the detection explicitly.
+  `HAVE_LibLZMA=0` or `HAVE_LibLZMA=1` to override the detection explicitly. When
+  xz support is enabled this way, link with `-llzma`.
 
 Installation
 ------------
@@ -39,14 +40,21 @@ the unit-tests of course (that requires _Catch2_ and `-DGXRIO_BUILD_TESTING=ON`)
 
 So building and installing is as simple as:
 
-```bash
-cmake -B build -DGXRIO_BUILD_TESTING=ON
+```console
+cmake -B build
 cmake --build build
 cmake --install build
 ```
 
 To build the `my-zcat` example application, configure with `-DGXRIO_BUILD_EXAMPLE=ON`.
-To run the unit-tests: `ctest --test-dir build`.
+
+To build the unit-tests and run them:
+
+```console
+cmake -B build -DGXRIO_BUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build
+```
 
 Usage
 -----
@@ -59,16 +67,23 @@ Note that due to the nature of compressed files, there is no way to seek in open
 Although, if anyone can convince me I might add that since the zlib implementation seems
 to have support for this.
 
+Because seeking is not supported, passing `std::ios::ate` when opening a compressed file
+does not work: the underlying file is positioned at its end and reading reports truncated
+input (`badbit` and `error() == true`) instead of returning the compressed bytes. For
+uncompressed files `ios::ate` behaves as usual.
+
 Also note that `gxrio::ifstream` decides what decompressor to use based on the file name
 extension (`.gz` or `.xz`), while `gxrio::istream` sniffs the content of the stream.
 
-Corrupt or truncated compressed input sets `badbit` on the stream. Concatenated gzip
-and xz streams, as well as xz stream padding, are supported.
+Corrupt or truncated compressed input sets `badbit` on the stream and can additionally be
+queried with `error()`. Concatenated gzip and xz streams, as well as xz stream padding, are
+supported.
 
 Opening a file for reading is as simple as:
 
 ```cpp
 #include <iostream>
+#include <string>
 #include <gxrio.hpp>
 
 int main(int argc, char * const argv[])
@@ -77,13 +92,13 @@ int main(int argc, char * const argv[])
 
 	if (not in.is_open())
 	{
-		std::cerr << "Could not open file" << std::endl;
-		exit(1);
+		std::cerr << "Could not open file" << '\n';
+		return 1;
 	}
 
 	std::string line;
-	while (getline(in, line))
-		std::cout << line << std::endl;
+	while (std::getline(in, line))
+		std::cout << line << '\n';
 
 	return 0;
 }
@@ -112,25 +127,26 @@ You can also use another buffer as input, as in this example:
 
 ```
 
-Writing is similar, however, having a _gxrio::ostream_ class is not very useful. It won't know what to
-do, so it writes uncompressed. But a _gxrio::ofstream_ class is provided, it will decide what compression to use based on the
-filename extension. So, writing becomes as simple as:
+Writing is similar. A `gxrio::ostream` is also available, but it writes uncompressed
+data; use a `gxrio::ofstream` when the compression should be chosen based on the filename
+extension. So, writing becomes as simple as:
 
 ```cpp
- 	gxrio::ofstream out("hello.xz");
- 	out << "Hello, world!" << std::endl;
- 	out.close();
+	gxrio::ofstream out("hello.xz");
+	out << "Hello, world!" << '\n';
+	out.close();
 ```
 
 The compression level (0 = no compression, 9 = maximum, the default) can be changed with
 `set_compression_level()`, either on the `gxrio::ofstream` or directly on the compressing
-streambuf classes.
+streambuf classes. Calling `flush()` pushes pending compressed data to the underlying
+stream; `close()` finishes the compressed stream.
 
 You can use the compressing streambuf classes in this package directly if you want. See the unit tests
 for the two compression standards for a real world example. It boils down to something like:
 
-```
-	ArrayedStreamBuffer<100> buffer;
+```cpp
+	std::stringbuf buffer;
 
 	gxrio::basic_oxz_streambuf<char, std::char_traits<char>> zb;
 	zb.init(&buffer);
@@ -138,6 +154,8 @@ for the two compression standards for a real world example. It boils down to som
 	zb.sputn("Hello, world!", 13);
 
 	zb.close();
+
+	// buffer.str() now holds the compressed xz data.
 ```
 
 Of course, you can also pass this buffer to a _std::ostream::rdbuf()_ call.

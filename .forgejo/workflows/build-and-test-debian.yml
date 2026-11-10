@@ -21,9 +21,9 @@ jobs:
     steps:
     - uses: https://data.forgejo.org/actions/checkout@v4
 
-    - name: Install Catch2 debian
+    - name: Install dependencies
       run: >
-        apt-get update && apt-get install -y catch2 build-essential ninja-build cmake
+        apt-get update && apt-get install -y catch2 build-essential ninja-build cmake zlib1g-dev liblzma-dev
 
     - name: Set reusable strings
       id: strings
@@ -44,4 +44,47 @@ jobs:
 
     - name: Test
       working-directory: ${{ steps.strings.outputs.build-output-dir }}
-      run: ctest --build-config ${{ matrix.build_type }}
+      run: ctest --build-config ${{ matrix.build_type }} --output-on-failure
+
+  sanitizers:
+    runs-on: debian-latest
+
+    strategy:
+      fail-fast: false
+
+      matrix:
+        os: [debian-latest]
+        build_type: [Debug]
+        cpp_compiler: [g++]
+
+    steps:
+    - uses: https://data.forgejo.org/actions/checkout@v4
+
+    - name: Install dependencies
+      run: >
+        apt-get update && apt-get install -y catch2 build-essential ninja-build cmake zlib1g-dev liblzma-dev
+
+    - name: Set reusable strings
+      id: strings
+      shell: bash
+      run: echo "build-output-dir=${{ github.workspace }}/build-sanitizers" >> "$GITHUB_OUTPUT"
+
+    - name: Configure CMake
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -G Ninja
+        -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DGXRIO_BUILD_TESTING=ON
+        -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
+        -S ${{ github.workspace }}
+
+    - name: Build
+      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+    - name: Test
+      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      env:
+        ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      run: ctest --build-config ${{ matrix.build_type }} --output-on-failure

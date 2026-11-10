@@ -173,42 +173,9 @@ TEST_CASE("move an ifstream while reading", "[t_copy_2]")
 
 // --------------------------------------------------------------------
 
-template <std::size_t SIZE, class CharT = char>
-class ArrayedStreamBuffer : public std::basic_streambuf<CharT>
-{
-  public:
-	using Base = std::basic_streambuf<CharT>;
-	using char_type = typename Base::char_type;
-	using int_type = typename Base::int_type;
-
-	ArrayedStreamBuffer()
-	{
-		Base::setp(buffer_.data(), buffer_.data() + buffer_.size()); // set std::basic_streambuf
-		                                                            // put area pointers to work with 'buffer_'
-	}
-
-	void reading()
-	{
-		Base::setg(Base::pbase(), Base::pbase(), Base::pptr());
-	}
-
-	[[nodiscard]] std::size_t size() const
-	{
-		return static_cast<std::size_t>(Base::pptr() - Base::pbase());
-	}
-
-	[[nodiscard]] int_type overflow(int_type ch) override
-	{
-		return Base::overflow(ch);
-	}
-
-  private:
-	std::array<char_type, SIZE> buffer_{};
-};
-
 TEST_CASE("compress directly to a streambuf", "[d_1]")
 {
-	ArrayedStreamBuffer<100> buffer;
+	array_streambuf<100> buffer;
 
 	gxrio::basic_oxz_streambuf<char, std::char_traits<char>> zb;
 	zb.init(&buffer);
@@ -283,7 +250,7 @@ TEST_CASE("round trip a 1000 line xz file", "[d_2]")
 
 TEST_CASE("move an oxz streambuf while compressing", "[d_3]")
 {
-	ArrayedStreamBuffer<100> buffer;
+	array_streambuf<100> buffer;
 
 	gxrio::basic_oxz_streambuf<char, std::char_traits<char>> zb;
 	zb.init(&buffer);
@@ -294,7 +261,7 @@ TEST_CASE("move an oxz streambuf while compressing", "[d_3]")
 
 	zb2.sputn("noot ", 5);
 
-	ArrayedStreamBuffer<100> discarded;
+	array_streambuf<100> discarded;
 
 	gxrio::basic_oxz_streambuf<char, std::char_traits<char>> zb3;
 	REQUIRE(zb3.init(&discarded) != nullptr);
@@ -330,7 +297,7 @@ TEST_CASE("move an oxz streambuf while compressing", "[d_3]")
 
 TEST_CASE("re-initializing an output streambuf keeps data on the old upstream", "[d_reinit]")
 {
-	ArrayedStreamBuffer<4096> first, second;
+	array_streambuf<4096> first, second;
 
 	gxrio::basic_oxz_streambuf<char, std::char_traits<char>> zb;
 	REQUIRE(zb.init(&first) != nullptr);
@@ -456,7 +423,7 @@ TEST_CASE("set the compression level on a streambuf", "[d_5]")
 		data += "line " + std::to_string(i) + ": alpha bravo charlie " + std::to_string((static_cast<unsigned>(i) * 2654435761u) % 1000000) + "\n";
 	}
 
-	ArrayedStreamBuffer<65536> level0, level9;
+	array_streambuf<65536> level0, level9;
 
 	gxrio::basic_oxz_streambuf<char, std::char_traits<char>> z0, z9;
 
@@ -578,7 +545,7 @@ TEST_CASE("garbage after an xz stream sets badbit", "[d_trailing]")
 
 TEST_CASE("flush makes compressed data available before close", "[d_flush]")
 {
-	ArrayedStreamBuffer<65536> buffer;
+	array_streambuf<65536> buffer;
 
 	gxrio::basic_oxz_streambuf<char, std::char_traits<char>> zb;
 	REQUIRE(zb.init(&buffer) != nullptr);
@@ -803,7 +770,7 @@ TEST_CASE("randomized xz round trips", "[d_random]")
 			for (char &ch : data)
 				ch = static_cast<char>(rng());
 
-		ArrayedStreamBuffer<262144> buffer;
+		array_streambuf<262144> buffer;
 
 		gxrio::basic_oxz_streambuf<char, std::char_traits<char>> zb;
 		REQUIRE(zb.init(&buffer) != nullptr);

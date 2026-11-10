@@ -1,7 +1,20 @@
 # Changelog
 
 ## [1.3.1] - 2026-11-08
-- Changed option BUILD_TESTING to GXRIO_BUILD_TESTING
+
+### Added
+- `error()` on `basic_istream` and `basic_ostream`, so `gxrio::ifstream` and
+  `gxrio::ofstream` can report (de)compression errors directly.
+- `[t_ate]` and `[t_error]` tests covering `ios::ate` and the new wrapper
+  `error()`, plus a shared `array_streambuf` test helper in `test-main.hpp`.
+
+### Changed
+- Renamed the CMake options `BUILD_TESTING`/`BUILD_EXAMPLE` to
+  `GXRIO_BUILD_TESTING`/`GXRIO_BUILD_EXAMPLE`.
+- CI now runs an AddressSanitizer/UndefinedBehaviorSanitizer job on Debian, and
+  the Debian job installs the zlib/liblzma development packages needed for the
+  full test matrix.
+- README separates plain installation from building and running the tests.
 
 ## [1.3.0] - 2026-11-08
 

@@ -168,7 +168,6 @@ TEST_CASE("writing and reading back compressed files", "[t_5]")
 
 TEST_CASE("move constructing an ofstream", "[t_6]")
 {
-
 	for (const fs::path& f : {
 			 gTestTempDir / "hello.txt.gz",
 #if HAVE_LibLZMA
@@ -769,4 +768,148 @@ TEST_CASE("gxrio::ostream writes uncompressed data", "[t_ostream]")
 	}
 
 	CHECK(buffer.str() == "Hello, world!");
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("ios::ate on uncompressed and compressed input", "[t_ate]")
+{
+	// Uncompressed input behaves like std::ifstream: ate positions at the end.
+	{
+		gxrio::ifstream in(gTestDir / "hello.txt", std::ios::in | std::ios::ate);
+		REQUIRE(in.is_open());
+
+		std::string line;
+		CHECK_FALSE(std::getline(in, line));
+		CHECK(in.eof());
+		CHECK_FALSE(in.bad());
+		CHECK_FALSE(in.error());
+	}
+
+	// Seeking is unsupported for compressed input, so starting at the end is
+	// reported as truncated input rather than returning the compressed bytes.
+	for (const fs::path &f : {
+			 gTestDir / "hello.txt.gz",
+#if HAVE_LibLZMA
+			 gTestDir / "hello.txt.xz",
+#endif
+		 })
+	{
+		gxrio::ifstream in(f, std::ios::in | std::ios::ate);
+		REQUIRE(in.is_open());
+
+		std::string line;
+		CHECK_FALSE(std::getline(in, line));
+		CHECK(in.bad());
+		CHECK(in.error());
+	}
+}
+
+// --------------------------------------------------------------------
+
+TEST_CASE("stream wrappers expose compression errors via error()", "[t_error]")
+{
+	// A healthy compressed input has no error.
+	{
+		gxrio::ifstream in(gTestDir / "hello.txt.gz");
+		REQUIRE(in.is_open());
+
+		std::string line;
+		REQUIRE(std::getline(in, line));
+		CHECK_FALSE(in.error());
+	}
+
+	// Plain input has no compressor, so error() is always false.
+	{
+		gxrio::ifstream in(gTestDir / "hello.txt");
+		REQUIRE(in.is_open());
+
+		std::string line;
+		REQUIRE(std::getline(in, line));
+		CHECK_FALSE(in.error());
+	}
+
+	// A corrupt, file-backed gzip stream reports the error.
+	{
+		std::vector<char> corrupt(
+			reinterpret_cast<const char *>(kGZippedData),
+			reinterpret_cast<const char *>(kGZippedData) + sizeof(kGZippedData));
+		corrupt[corrupt.size() / 2] ^= 0x5a;
+
+		fs::path f = gTestTempDir / "corrupt-error.txt.gz";
+		{
+			std::ofstream raw(f, std::ios::binary | std::ios::trunc);
+			REQUIRE(raw.good());
+			raw.write(corrupt.data(), static_cast<std::streamsize>(corrupt.size()));
+			REQUIRE(raw.good());
+		}
+
+		gxrio::ifstream in(f);
+		REQUIRE(in.is_open());
+
+		std::string line;
+		while (std::getline(in, line))
+			;
+
+		CHECK(in.bad());
+		CHECK(in.error());
+	}
+
+	// A corrupt in-memory stream reports the error too.
+	{
+		std::vector<unsigned char> corrupt(std::begin(kGZippedData), std::end(kGZippedData));
+		corrupt[corrupt.size() / 2] ^= 0x5a;
+
+		struct membuf : public std::streambuf
+		{
+			membuf(std::vector<unsigned char> &data)
+			{
+				auto *p = reinterpret_cast<char *>(data.data());
+				this->setg(p, p, p + data.size());
+			}
+		} buffer(corrupt);
+
+		gxrio::istream in(&buffer);
+
+		std::string line;
+		while (std::getline(in, line))
+			;
+
+		CHECK(in.bad());
+		CHECK(in.error());
+	}
+
+	// A successful compressed write leaves error() false.
+	{
+		fs::path f = gTestTempDir / "healthy-error.txt.gz";
+		gxrio::ofstream out(f);
+		REQUIRE(out.is_open());
+		out << "Hello, world!\n";
+		out.close();
+		REQUIRE_FALSE(out.fail());
+		CHECK_FALSE(out.error());
+	}
+
+#if defined(__linux__)
+	// A failing output device reports the error through the wrapper as well.
+	{
+		fs::path link = gTestTempDir / "full-error.txt.gz";
+		std::error_code ec;
+		fs::remove(link, ec);
+		fs::create_symlink("/dev/full", link, ec);
+
+		if (not ec)
+		{
+			gxrio::ofstream out(link);
+			REQUIRE(out.is_open());
+
+			std::string data(100000, 'x');
+			out.write(data.data(), static_cast<std::streamsize>(data.size()));
+			out.flush();
+
+			CHECK(out.bad());
+			CHECK(out.error());
+		}
+	}
+#endif
 }

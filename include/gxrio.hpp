@@ -1344,6 +1344,15 @@ class basic_istream : public std::basic_istream<CharT, Traits>
 		return *this;
 	}
 
+	/// \brief Return true if a (de)compression error was encountered
+	///
+	/// This reports errors from the underlying compression streambuf. It is
+	/// false for streams that read uncompressed data.
+	[[nodiscard]] bool error() const noexcept
+	{
+		return m_gxriobuf != nullptr and m_gxriobuf->error();
+	}
+
 	/// \brief Construct an istream with the passed in streambuf \a buf
 	///
 	/// \param buf The streambuf that provides the compressed data
@@ -1798,6 +1807,15 @@ class basic_ostream : public std::basic_ostream<CharT, Traits>
 		this->rdbuf(m_gxriobuf ? m_gxriobuf.get() : m_upstream);
 
 		return *this;
+	}
+
+	/// \brief Return true if a (de)compression error was encountered
+	///
+	/// This reports errors from the underlying compression streambuf. It is
+	/// false for streams that write uncompressed data.
+	[[nodiscard]] bool error() const noexcept
+	{
+		return m_gxriobuf != nullptr and m_gxriobuf->error();
 	}
 
   protected:

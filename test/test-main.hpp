@@ -102,6 +102,39 @@ class chunked_streambuf : public std::streambuf
 	std::size_t m_chunk;
 };
 
+/// \brief A streambuf that uses an array as storage
+template <std::size_t SIZE, class CharT = char>
+class array_streambuf : public std::basic_streambuf<CharT>
+{
+  public:
+	using base = std::basic_streambuf<CharT>;
+	using char_type = typename base::char_type;
+	using int_type = typename base::int_type;
+
+	array_streambuf()
+	{
+		base::setp(buffer_.data(),
+			buffer_.data() +
+				buffer_.size()); // set std::basic_streambuf
+		                         // put area pointers to work with 'buffer_'
+	}
+
+	void reading() { base::setg(base::pbase(), base::pbase(), base::pptr()); }
+
+	[[nodiscard]] std::size_t size() const
+	{
+		return static_cast<std::size_t>(base::pptr() - base::pbase());
+	}
+
+	[[nodiscard]] int_type overflow(int_type ch) override
+	{
+		return base::overflow(ch);
+	}
+
+  private:
+	std::array<char_type, SIZE> buffer_{};
+};
+
 /// \brief Shared main for all test executables
 ///
 /// Adds a --testdir command line option that overrides the automatic
