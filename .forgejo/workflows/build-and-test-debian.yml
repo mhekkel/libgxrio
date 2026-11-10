@@ -36,6 +36,7 @@ jobs:
         -G Ninja
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DGXRIO_BUILD_TESTING=ON
         -S ${{ github.workspace }}
 
     - name: Build

@@ -248,7 +248,7 @@ TEST_CASE("round trip a 1000 line xz file", "[d_2]")
 	std::string line;
 
 	while (getline(in, line))
-		out << line << std::endl;
+		out << line << '\n';
 
 	in.close();
 	out.close();

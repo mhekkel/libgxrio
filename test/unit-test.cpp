@@ -41,7 +41,7 @@ int main(int argc, char *argv[])
 
 TEST_CASE("reading compressed and uncompressed files", "[t_1]")
 {
-	for (fs::path f : {
+	for (const fs::path& f : {
 			 gTestDir / "hello.txt.gz",
 #if HAVE_LibLZMA
 			 gTestDir / "hello.txt.xz",
@@ -66,7 +66,7 @@ TEST_CASE("reading compressed and uncompressed files", "[t_1]")
 
 TEST_CASE("reading compressed and uncompressed files via ifstream", "[t_2]")
 {
-	for (fs::path f : {
+	for (const fs::path& f : {
 			 gTestDir / "hello.txt.gz",
 #if HAVE_LibLZMA
 			 gTestDir / "hello.txt.xz",
@@ -88,7 +88,7 @@ TEST_CASE("reading compressed and uncompressed files via ifstream", "[t_2]")
 
 TEST_CASE("move constructing an ifstream", "[t_3]")
 {
-	for (fs::path f : {
+	for (const fs::path& f : {
 			 gTestDir / "hello.txt.gz",
 #if HAVE_LibLZMA
 			 gTestDir / "hello.txt.xz",
@@ -113,7 +113,7 @@ TEST_CASE("move constructing an ifstream", "[t_3]")
 
 TEST_CASE("move assigning an ifstream", "[t_4]")
 {
-	for (fs::path f : {
+	for (const fs::path& f : {
 			 gTestDir / "hello.txt.gz",
 #if HAVE_LibLZMA
 			 gTestDir / "hello.txt.xz",
@@ -140,7 +140,7 @@ TEST_CASE("move assigning an ifstream", "[t_4]")
 
 TEST_CASE("writing and reading back compressed files", "[t_5]")
 {
-	for (fs::path f : {
+	for (const fs::path& f : {
 			 gTestTempDir / "hello.txt.gz",
 #if HAVE_LibLZMA
 			 gTestTempDir / "hello.txt.xz",
@@ -150,7 +150,7 @@ TEST_CASE("writing and reading back compressed files", "[t_5]")
 		gxrio::ofstream out(f);
 		REQUIRE(out.is_open());
 
-		out << "Hello, world!" << std::endl;
+		out << "Hello, world!" << '\n';
 		out.close();
 
 		gxrio::ifstream in(f);
@@ -169,7 +169,7 @@ TEST_CASE("writing and reading back compressed files", "[t_5]")
 TEST_CASE("move constructing an ofstream", "[t_6]")
 {
 
-	for (fs::path f : {
+	for (const fs::path& f : {
 			 gTestTempDir / "hello.txt.gz",
 #if HAVE_LibLZMA
 			 gTestTempDir / "hello.txt.xz",
@@ -182,7 +182,7 @@ TEST_CASE("move constructing an ofstream", "[t_6]")
 		gxrio::ofstream out_2(std::move(out_1));
 		REQUIRE(out_2.is_open());
 
-		out_2 << "Hello, world!" << std::endl;
+		out_2 << "Hello, world!" << '\n';
 		out_2.close();
 
 		gxrio::ifstream in(f);
@@ -199,7 +199,7 @@ TEST_CASE("move constructing an ofstream", "[t_6]")
 
 TEST_CASE("move assigning an ofstream", "[t_7]")
 {
-	for (fs::path f : {
+	for (const fs::path& f : {
 			 gTestTempDir / "hello.txt.gz",
 #if HAVE_LibLZMA
 			 gTestTempDir / "hello.txt.xz",
@@ -213,7 +213,7 @@ TEST_CASE("move assigning an ofstream", "[t_7]")
 		out_2 = std::move(out_1);
 		REQUIRE(out_2.is_open());
 
-		out_2 << "Hello, world!" << std::endl;
+		out_2 << "Hello, world!" << '\n';
 		out_2.close();
 
 		gxrio::ifstream in(f);
@@ -281,7 +281,7 @@ TEST_CASE("swapping ifstream objects", "[t_9]")
 	gxrio::ofstream out_1, out_2(out_file);
 	out_1.swap(out_2);
 
-	out_1 << "Hello, world!" << std::endl;
+	out_1 << "Hello, world!" << '\n';
 	out_1.close();
 
 	gxrio::ifstream in(out_file);
@@ -333,12 +333,12 @@ TEST_CASE("reopening with a different extension", "[t_10]")
 	gxrio::ofstream out;
 	out.open(out_dir / "reopen.txt.gz");
 	REQUIRE(out.is_open());
-	out << "Hello, world!" << std::endl;
+	out << "Hello, world!" << '\n';
 	out.close();
 
 	out.open(out_dir / "reopen.txt");
 	REQUIRE(out.is_open());
-	out << "Hello, world!" << std::endl;
+	out << "Hello, world!" << '\n';
 	out.close();
 
 	// Verify with a plain ifstream that the .txt file really is uncompressed;
@@ -353,12 +353,12 @@ TEST_CASE("reopening with a different extension", "[t_10]")
 	// The reverse direction must work as well.
 	out.open(out_dir / "reopen.txt");
 	REQUIRE(out.is_open());
-	out << "Hello, world!" << std::endl;
+	out << "Hello, world!" << '\n';
 	out.close();
 
 	out.open(out_dir / "reopen.txt.gz");
 	REQUIRE(out.is_open());
-	out << "Hello, world!" << std::endl;
+	out << "Hello, world!" << '\n';
 	out.close();
 
 	std::ifstream raw_gz(out_dir / "reopen.txt.gz", std::ios::binary);
@@ -537,7 +537,7 @@ TEST_CASE("moving an istream wrapping an uncompressed streambuf", "[t_11]")
 TEST_CASE("truncated compressed input sets badbit", "[t_12]")
 {
 	// truncated compressed input reads what is available and hits eof without hanging
-	for (fs::path f : {
+	for (const fs::path& f : {
 #if HAVE_LibLZMA
 			 gTestDir / "hello.txt.xz",
 #endif
@@ -659,7 +659,7 @@ TEST_CASE("setting the compression level", "[t_14]")
 		out.set_compression_level(42);
 		out.open(f);
 		REQUIRE(out.is_open());
-		out << "Hello, world!" << std::endl;
+		out << "Hello, world!" << '\n';
 		out.close();
 		REQUIRE_FALSE(out.fail());
 

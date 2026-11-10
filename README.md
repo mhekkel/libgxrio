@@ -35,18 +35,17 @@ Installation
 ------------
 
 This library is a header only library. No need to compile anything. Unless you want to run
-the unit-tests of course (that requires _Catch2_ and `-DBUILD_TESTING=ON`, which is on by
-default when using CTest).
+the unit-tests of course (that requires _Catch2_ and `-DGXRIO_BUILD_TESTING=ON`).
 
 So building and installing is as simple as:
 
 ```bash
-cmake -B build # (optionally providing e.g. -DCMAKE_INSTALL_PREFIX=$HOME/.local )
+cmake -B build -DGXRIO_BUILD_TESTING=ON
 cmake --build build
 cmake --install build
 ```
 
-To build the `my-zcat` example application, configure with `-DBUILD_EXAMPLE=ON`.
+To build the `my-zcat` example application, configure with `-DGXRIO_BUILD_EXAMPLE=ON`.
 To run the unit-tests: `ctest --test-dir build`.
 
 Usage
